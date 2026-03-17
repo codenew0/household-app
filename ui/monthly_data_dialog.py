@@ -156,44 +156,24 @@ class MonthlyDataDialog(BaseDialog):
         data = self.monthly_data[row_index]
         year, month, day, col_index = data['sort_key']
         
-        # 親アプリケーションの年月を変更
-        if self.parent_app.current_year != year or self.parent_app.current_month != month:
+        # 親アプリケーションの年月を変更（通常は同じ月だが念のため対応）
+        need_redraw = (self.parent_app.current_year != year or
+                       self.parent_app.current_month != month)
+        if need_redraw:
             self.parent_app.current_year = year
             self.parent_app.current_month = month
             self.parent_app.update_year_display()
             self.parent_app.select_month(month)
         
-        # 該当する行とセルに移動
-        self._navigate_to_cell(day, col_index)
+        # 再描画後にセル選択（月切り替え時は再描画完了を待って遅延実行）
+        if need_redraw:
+            self.after(50, lambda: self.parent_app.navigate_to_cell(day, col_index))
+        else:
+            self.parent_app.navigate_to_cell(day, col_index)
     
     def _on_mousewheel(self, event):
         """マウスホイールによるスクロール処理"""
         self.result_tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
-    
-    def _navigate_to_cell(self, day, col_index):
-        """メインウィンドウの指定されたセルに移動してハイライトする"""
-        if not self.parent_app.tree:
-            return
-        
-        items = self.parent_app.tree.get_children()
-        if not items:
-            return
-        
-        target_item = None
-        
-        if day == 0:
-            target_item = items[-1]
-        else:
-            for item in items[:-2]:
-                values = self.parent_app.tree.item(item, 'values')
-                if values and str(values[0]).strip() == str(day):
-                    target_item = item
-                    break
-        
-        if target_item:
-            self.parent_app.tree.selection_set(target_item)
-            self.parent_app.tree.see(target_item)
-            self.parent_app.tree.focus(target_item)
     
     def _sort_by_column(self, column):
         """指定された列でデータをソートする"""

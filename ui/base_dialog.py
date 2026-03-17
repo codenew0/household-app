@@ -72,3 +72,48 @@ class BaseDialog(tk.Toplevel):
         min_width = int(width * DialogConfig.MIN_SIZE_RATIO)
         min_height = int(height * 0.67)
         self.minsize(min_width, min_height)
+
+    def navigate_to_cell(self, parent_app, day, col_index, delay=False):
+        """
+        メインウィンドウの指定セルに移動して選択状態にする共通メソッド。
+
+        Args:
+            parent_app: MainWindowのインスタンス
+            day: 移動先の日（0=まとめ行）
+            col_index: 移動先の列インデックス
+            delay: Trueの場合、50ms遅延してから実行（月切り替え後の再描画待ち用）
+        """
+        if delay:
+            self.after(50, lambda: self._do_navigate(parent_app, day, col_index))
+        else:
+            self._do_navigate(parent_app, day, col_index)
+
+    def _do_navigate(self, parent_app, day, col_index):
+        """実際のナビゲーション処理"""
+        if not parent_app.tree:
+            return
+
+        items = parent_app.tree.get_children()
+        if not items:
+            return
+
+        target_item = None
+
+        if day == 0:
+            target_item = items[-1]
+        else:
+            for item in items[:-2]:
+                values = parent_app.tree.item(item, 'values')
+                if values and str(values[0]).strip() == str(day):
+                    target_item = item
+                    break
+
+        if target_item:
+            parent_app.tree.selection_set(target_item)
+            parent_app.tree.see(target_item)
+            parent_app.tree.focus(target_item)
+            # 列のハイライト・コピペ等で使われる選択状態を更新
+            col_id = f"#{col_index + 1}"
+            parent_app.selected_column_id = col_id
+            parent_app.selection_start_col = col_id
+            parent_app.ctrl_selected_cells = [(target_item, col_id)]

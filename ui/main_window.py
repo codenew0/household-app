@@ -556,6 +556,50 @@ class MainWindow:
         self.current_month_button.config(text=f"📅 {month:02d}月")
         self._update_month_buttons()
         self._show_month(month)
+
+    def navigate_to_cell(self, day, col_index):
+        """
+        指定された日・列のセルに移動して選択状態にする。
+        検索ダイアログや月間データダイアログから呼び出す用。
+
+        Args:
+            day: 移動先の日（0=まとめ行）
+            col_index: 移動先の列インデックス
+        """
+        if not self.tree:
+            return
+
+        items = self.tree.get_children()
+        if not items:
+            return
+
+        target_item = None
+
+        if day == 0:
+            target_item = items[-1]
+        else:
+            for item in items[:-2]:
+                values = self.tree.item(item, 'values')
+                if values and str(values[0]).strip().split('(')[0].strip() == str(day):
+                    target_item = item
+                    break
+
+        if target_item:
+            # <Button-1>イベントを一時的に無効化して選択が上書きされないようにする
+            self.tree.unbind("<Button-1>")
+
+            self.tree.selection_set(target_item)
+            self.tree.see(target_item)
+            self.tree.focus(target_item)
+
+            col_id = f"#{col_index + 1}"
+            self.selected_column_id = col_id
+            self.selection_start_row = target_item
+            self.selection_start_col = col_id
+            self.ctrl_selected_cells = [(target_item, col_id)]
+
+            # 次のイベントループでバインドを復元
+            self.root.after(100, lambda: self.tree.bind("<Button-1>", self._on_single_click))
     
     def _update_month_buttons(self):
         """月選択ボタンのハイライトを更新する"""
@@ -1456,10 +1500,7 @@ class MainWindow:
                     base_col_idx = 3  # 収入列
                 else:
                     try:
-                        m = re.search(r'\d+', str(row_vals[0]))
-                        if not m:
-                            return
-                        base_day = int(m.group())
+                        base_day = int(str(row_vals[0]).strip())
                     except ValueError:
                         return
         
@@ -1500,10 +1541,7 @@ class MainWindow:
                 base_col_idx = 3  # 収入列
             else:
                 try:
-                    m = re.search(r'\d+', str(row_vals[0]))
-                    if not m:
-                        return
-                    base_day = int(m.group())
+                    base_day = int(str(row_vals[0]).strip())
                 except ValueError:
                     return
         

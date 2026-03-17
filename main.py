@@ -5,27 +5,39 @@
 """
 import tkinter as tk
 from tkinter import messagebox
-import socket
 import sys
-from ui.main_window import MainWindow
+from ui.main_window import MainWindow 
 from utils.font_utils import setup_japanese_font
+import os
+import tempfile
+
+LOCK_FILE = os.path.join(tempfile.gettempdir(), "kakeibo_app.lock")
 
 def check_single_instance():
-    """
-    アプリケーションの二重起動を防止する。
-    特定のポートにバインドを試み、失敗した場合は既に起動していると判断する。
-    """
-    # 任意のポート番号（他と被りにくい番号を使用）
-    PORT = 54321
-
     try:
-        # ソケットを作成
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # ポートにバインド（この処理が成功している間は、他からのバインドは失敗する）
-        sock.bind(('127.0.0.1', PORT))
-        return sock
-    except socket.error:
+        # 既存のロックファイルをチェック
+        if os.path.exists(LOCK_FILE):
+            with open(LOCK_FILE, 'r') as f:
+                pid = int(f.read().strip())
+            # そのPIDのプロセスが実際に生きているか確認
+            import psutil
+            if psutil.pid_exists(pid):
+                return None  # 既に起動中
+            # プロセスが死んでいれば古いロックファイルを無視
+        
+        # ロックファイルを作成
+        with open(LOCK_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+        return LOCK_FILE
+    except Exception:
         return None
+
+def release_lock(lock):
+    try:
+        if lock and os.path.exists(lock):
+            os.remove(lock)
+    except Exception:
+        pass
 
 def main():
     """アプリケーションのメインエントリーポイント"""
@@ -60,7 +72,7 @@ def main():
         traceback.print_exc()
     finally:
         # アプリケーション終了時にソケットを閉じる
-        if instance_lock:
+        if instance_lock and hasattr(instance_lock, 'close'):
             instance_lock.close()
 
 if __name__ == "__main__":
