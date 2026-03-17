@@ -311,11 +311,12 @@ class DataManager:
         
         # 既存データがあれば読み込んでマージ
         existing_data = {}
+        existing_file_content = None
         if os.path.exists(data_file):
             try:
                 with open(data_file, "r", encoding="utf-8") as f:
-                    file_content = json.load(f)
-                    existing_data = file_content.get("data", {})
+                    existing_file_content = json.load(f)
+                    existing_data = existing_file_content.get("data", {})
             except:
                 pass
         
@@ -329,6 +330,10 @@ class DataManager:
             "month": month,
             "data": existing_data
         }
+        
+        # ファイルが既に存在し、内容が同じなら書き込みをスキップ
+        if existing_file_content is not None and existing_file_content == save_data:
+            return
         
         try:
             with open(data_file, "w", encoding="utf-8") as f:
