@@ -77,6 +77,16 @@ class DataManager:
             pass
         return None
     
+    @staticmethod
+    def _to_new_format_transaction(col_index, transaction):
+        """内部形式の1取引を新ファイルフォーマットに変換する"""
+        return {
+            "列目": str(col_index),
+            "支払先": str(transaction[0]) if transaction[0] else "",
+            "金額": str(transaction[1]) if transaction[1] else "",
+            "詳細": str(transaction[2]) if transaction[2] else ""
+        }
+
     def _convert_old_to_new_format(self, old_data):
         """
         旧フォーマットのデータを新フォーマットに変換
@@ -110,13 +120,9 @@ class DataManager:
             # 各取引を新フォーマットに変換
             for transaction in transactions:
                 if len(transaction) >= 3:
-                    new_transaction = {
-                        "列目": str(col_index),
-                        "支払先": str(transaction[0]) if transaction[0] else "",
-                        "金額": str(transaction[1]) if transaction[1] else "",
-                        "詳細": str(transaction[2]) if transaction[2] else ""
-                    }
-                    converted[year_month_key][day_key].append(new_transaction)
+                    converted[year_month_key][day_key].append(
+                        self._to_new_format_transaction(col_index, transaction)
+                    )
         
         return converted
     
@@ -245,12 +251,8 @@ class DataManager:
             with open(self.DATA_FILE, "r", encoding="utf-8") as f:
                 old_data = json.load(f)
             
-            # バージョン情報がある場合
-            if "version" in old_data:
-                data_dict = old_data.get("data", {})
-            else:
-                data_dict = old_data.get("data", {})
-            
+            data_dict = old_data.get("data", {})
+
             # 新フォーマットに変換
             converted = self._convert_old_to_new_format(data_dict)
             
@@ -280,11 +282,8 @@ class DataManager:
             with open(self.DATA_FILE_OLD, "r", encoding="utf-8") as f:
                 old_data = json.load(f)
             
-            if "version" in old_data:
-                data_dict = old_data.get("data", {})
-            else:
-                data_dict = old_data.get("data", {})
-            
+            data_dict = old_data.get("data", {})
+
             # 既存データとマージ(既存優先) + 支払先の抽出を同時に実行
             for key, value in data_dict.items():
                 if key not in self.data:
@@ -311,18 +310,19 @@ class DataManager:
         
         # 既存データがあれば読み込んでマージ
         existing_data = {}
-        existing_file_content = None
+        original_file_data = None
         if os.path.exists(data_file):
             try:
                 with open(data_file, "r", encoding="utf-8") as f:
-                    existing_file_content = json.load(f)
-                    existing_data = existing_file_content.get("data", {})
+                    file_content = json.load(f)
+                    existing_data = file_content.get("data", {})
+                    original_file_data = file_content.get("data", {}).copy()
             except:
                 pass
-        
+
         # データをマージ
         existing_data.update(month_data)
-        
+
         # 保存
         save_data = {
             "version": self.APP_VERSION,
@@ -330,9 +330,9 @@ class DataManager:
             "month": month,
             "data": existing_data
         }
-        
-        # ファイルが既に存在し、内容が同じなら書き込みをスキップ
-        if existing_file_content is not None and existing_file_content == save_data:
+
+        # マージ後のデータがファイルの内容と同じなら書き込みをスキップ
+        if original_file_data is not None and original_file_data == existing_data:
             return
         
         try:
@@ -442,56 +442,74 @@ class DataManager:
             # 新フォーマットに変換
             for transaction in transactions:
                 if len(transaction) >= 3:
-                    new_transaction = {
-                        "列目": str(col_index),
-                        "支払先": str(transaction[0]) if transaction[0] else "",
-                        "金額": str(transaction[1]) if transaction[1] else "",
-                        "詳細": str(transaction[2]) if transaction[2] else ""
-                    }
-                    year_month_data[year_month_key][day_key].append(new_transaction)
+                    year_month_data[year_month_key][day_key].append(
+                        self._to_new_format_transaction(col_index, transaction)
+                    )
         
         # 年月ごとに保存
         for (year, month), month_data in year_month_data.items():
             self._save_month_data(year, month, month_data)
     
-    def auto_save_transaction(self, dict_key):
+    def save_transaction(self, dict_key):
         """
-        特定の取引データを即座に保存
-        
+        指定キーに関連する日のデータを保存する。
+        同じ日の全列のデータを収集してから保存する。
+
         Args:
             dict_key: データのキー(年-月-日-列インデックス)
         """
         parsed = self._parse_key(dict_key)
         if not parsed:
             return
-        
-        year, month, day, col_index = parsed
-        
-        # この年月の全データを収集
-        month_data = {}
+
+        year, month, day, _ = parsed
+        self._save_day_data(year, month, day)
+
+    def save_transactions(self, dict_keys):
+        """
+        複数キーに関連するデータをまとめて保存する。
+        同じ年月日のデータは1回だけ保存する。
+
+        Args:
+            dict_keys: データのキーのリスト
+        """
+        # 年月日でグループ化して重複保存を防ぐ
+        saved_days = set()
+        for dict_key in dict_keys:
+            parsed = self._parse_key(dict_key)
+            if not parsed:
+                continue
+            year, month, day, _ = parsed
+            day_tuple = (year, month, day)
+            if day_tuple not in saved_days:
+                saved_days.add(day_tuple)
+                self._save_day_data(year, month, day)
+
+    def _save_day_data(self, year, month, day):
+        """
+        指定された日の全列データを収集して月データファイルに保存する。
+
+        Args:
+            year: 年
+            month: 月
+            day: 日
+        """
         day_key = str(day)
-        
-        # 現在の日のデータを新フォーマットに変換
-        if dict_key in self.data:
-            transactions = self.data[dict_key]
-            
-            if day_key not in month_data:
-                month_data[day_key] = []
-            
-            for transaction in transactions:
-                if len(transaction) >= 3:
-                    new_transaction = {
-                        "列目": str(col_index),
-                        "支払先": str(transaction[0]) if transaction[0] else "",
-                        "金額": str(transaction[1]) if transaction[1] else "",
-                        "詳細": str(transaction[2]) if transaction[2] else ""
-                    }
-                    month_data[day_key].append(new_transaction)
-        else:
-            # データが削除された場合、空で保存(既存データから削除)
-            month_data[day_key] = []
-        
-        # 保存
+        month_data = {day_key: []}
+
+        # 同じ年月日の全列のデータを収集
+        for key, transactions in self.data.items():
+            key_parsed = self._parse_key(key)
+            if not key_parsed:
+                continue
+            k_year, k_month, k_day, k_col = key_parsed
+            if k_year == year and k_month == month and k_day == day:
+                for transaction in transactions:
+                    if len(transaction) >= 3:
+                        month_data[day_key].append(
+                            self._to_new_format_transaction(k_col, transaction)
+                        )
+
         self._save_month_data(year, month, month_data)
     
     def load_settings(self):
@@ -523,8 +541,9 @@ class DataManager:
     
     def set_transaction_data(self, dict_key, data_list):
         """
-        指定されたキーに取引データを設定し、即座に保存
-        
+        指定されたキーに取引データを設定する（メモリのみ）
+        ファイル保存は呼び出し側で明示的に行う。
+
         Args:
             dict_key: データのキー(年-月-日-列インデックス)
             data_list: 設定する取引データのリスト
@@ -533,22 +552,17 @@ class DataManager:
             self.data[dict_key] = data_list
         elif dict_key in self.data:
             del self.data[dict_key]
-        
-        # 即座に保存
-        self.auto_save_transaction(dict_key)
-    
+
     def delete_transaction_data(self, dict_key):
         """
-        指定されたキーの取引データを削除し、即座に保存
-        
+        指定されたキーの取引データを削除する（メモリのみ）
+        ファイル保存は呼び出し側で明示的に行う。
+
         Args:
             dict_key: データのキー
         """
         if dict_key in self.data:
             del self.data[dict_key]
-        
-        # 即座に保存
-        self.auto_save_transaction(dict_key)
     
     def add_transaction_partner(self, partner):
         """支払先を履歴に追加"""
@@ -614,13 +628,9 @@ class DataManager:
                     
                     for transaction in transactions:
                         if len(transaction) >= 3:
-                            new_transaction = {
-                                "列目": str(col_idx),
-                                "支払先": str(transaction[0]) if transaction[0] else "",
-                                "金額": str(transaction[1]) if transaction[1] else "",
-                                "詳細": str(transaction[2]) if transaction[2] else ""
-                            }
-                            month_data[day_key].append(new_transaction)
+                            month_data[day_key].append(
+                                self._to_new_format_transaction(col_idx, transaction)
+                            )
             
             self._save_month_data(year, month, month_data)
     

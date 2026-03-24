@@ -1439,14 +1439,19 @@ class MainWindow:
         
         # まずコピー
         self._copy_cells()
-        
+
         # 次に削除
+        affected_keys = []
         for row_id, col_id, day, col_idx in cells:
             dict_key = f"{self.current_year}-{self.current_month}-{day}-{col_idx}"
             self.data_manager.delete_transaction_data(dict_key)
-            
+            affected_keys.append(dict_key)
+
             # UI更新
             self.update_parent_cell(f"{self.current_year}-{self.current_month}-{day}", col_idx, "")
+
+        # ファイルに保存
+        self.data_manager.save_transactions(affected_keys)
     
     def _paste_cells(self, event=None):
         """
@@ -1563,6 +1568,7 @@ class MainWindow:
                 
                 # 既存データの確認（上書き）
                 self.data_manager.set_transaction_data(dict_key, new_data_list)
+                self.data_manager.save_transaction(dict_key)
                 total = sum(parse_amount(row[1]) for row in new_data_list if len(row) > 1)
                 self.update_parent_cell(f"{self.current_year}-{self.current_month}-{base_day}", base_col_idx, str(total))
             return
@@ -1595,6 +1601,7 @@ class MainWindow:
                 
                 if new_data_list:
                     self.data_manager.set_transaction_data(dict_key, new_data_list)
+                    self.data_manager.save_transaction(dict_key)
                     total = sum(parse_amount(row[1]) for row in new_data_list if len(row) > 1)
                     self.update_parent_cell(f"{self.current_year}-{self.current_month}-{base_day}", base_col_idx, str(total))
             else:
@@ -1637,9 +1644,10 @@ class MainWindow:
                         total = sum(parse_amount(row[1]) for row in new_data if len(row) > 1)
                         self.update_parent_cell(f"{self.current_year}-{self.current_month}-{target_day}", target_col_idx, str(total))
                 
-                # Undo履歴に保存
+                # Undo履歴に保存・ファイルに保存
                 if undo_data:
                     self._save_undo_state('paste', undo_data)
+                    self.data_manager.save_transactions([key for key, _ in undo_data])
     
     def _delete_cells(self, event=None):
         """
@@ -1657,13 +1665,18 @@ class MainWindow:
             undo_data.append((dict_key, old_data[:] if old_data else None))
         
         self._save_undo_state('delete', undo_data)
-        
+
+        affected_keys = []
         for row_id, col_id, day, col_idx in cells:
             dict_key = f"{self.current_year}-{self.current_month}-{day}-{col_idx}"
             self.data_manager.delete_transaction_data(dict_key)
-            
+            affected_keys.append(dict_key)
+
             # UI更新
             self.update_parent_cell(f"{self.current_year}-{self.current_month}-{day}", col_idx, "")
+
+        # ファイルに保存
+        self.data_manager.save_transactions(affected_keys)
 
     def _save_undo_state(self, action_type, cells_data):
         """
