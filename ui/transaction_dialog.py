@@ -830,39 +830,14 @@ class TransactionDialog(BaseDialog):
         """OKボタンの処理"""
         # 編集前のデータを保存（元に戻す用）
         old_data = self.parent_app.data_manager.get_transaction_data(self.dict_key)
-        
-        # すべての行データを収集
-        all_rows = []
-        for item_id in self.tree.get_children():
-            values = self.tree.item(item_id, 'values')
-            row = list(values)
-            while len(row) < 3:
-                row.append("")
-            all_rows.append(tuple(row))
-        
-        # 空行を除去
-        filtered_rows = [row for row in all_rows if any(str(cell).strip() for cell in row)]
-        
-        if not filtered_rows:
-            # データが空の場合
-            dict_key_day = f"{self.year}-{self.month}-{self.day}"
-            self.parent_app.update_parent_cell(dict_key_day, self.col_index, "")
-            self.parent_app.data_manager.delete_transaction_data(self.dict_key)
-        else:
-            # データがある場合
-            self.parent_app.data_manager.set_transaction_data(self.dict_key, filtered_rows)
-            
-            # 金額列(インデックス1)を合計
-            total = sum(parse_amount(row[1]) for row in filtered_rows if len(row) > 1)
-            
-            # 親セルを更新
-            dict_key_day = f"{self.year}-{self.month}-{self.day}"
-            display_value = str(total) if total != 0 else ""
-            self.parent_app.update_parent_cell(dict_key_day, self.col_index, display_value)
-        
-        # データが変更されていればメインウィンドウの元に戻すスタックに保存
+
+        # データを反映（メモリのみ）
+        self._apply_changes_to_parent()
+
+        # データが変更されていればファイルに保存し、undo履歴に記録
         new_data = self.parent_app.data_manager.get_transaction_data(self.dict_key)
         if old_data != new_data:
+            self.parent_app.data_manager.save_transaction(self.dict_key)
             self.parent_app._save_undo_state('edit_detail', [(self.dict_key, old_data[:] if old_data else None)])
-        
+
         self.destroy()
