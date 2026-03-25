@@ -1505,7 +1505,8 @@ class MainWindow:
                     base_col_idx = 3  # 収入列
                 else:
                     try:
-                        base_day = int(str(row_vals[0]).strip())
+                        day_str = str(row_vals[0]).strip().split('(')[0].strip()
+                        base_day = int(day_str)
                     except ValueError:
                         return
         
@@ -1546,7 +1547,8 @@ class MainWindow:
                 base_col_idx = 3  # 収入列
             else:
                 try:
-                    base_day = int(str(row_vals[0]).strip())
+                    day_str = str(row_vals[0]).strip().split('(')[0].strip()
+                    base_day = int(day_str)
                 except ValueError:
                     return
         
