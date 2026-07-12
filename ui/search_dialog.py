@@ -72,7 +72,8 @@ class SearchDialog(BaseDialog):
         
         # 結果表示用Treeview
         columns = ["年月日", "項目", "支払先", "金額(円)", "メモ"]
-        self.result_tree = ttk.Treeview(result_frame, columns=columns, show="headings", height=15)
+        self.result_tree = ttk.Treeview(result_frame, columns=columns, show="headings",
+                                        height=15, selectmode="extended")
         
         # 列の設定
         self.default_column_widths = {}
@@ -190,8 +191,17 @@ class SearchDialog(BaseDialog):
                 self.result_tree.heading(col, text=col)
     
     def _on_header_right_click(self, event):
-        """ヘッダーの右クリックイベントを処理する"""
+        """検索結果またはヘッダーの右クリックを処理する。"""
         region = self.result_tree.identify_region(event.x, event.y)
+        if region in ("cell", "tree"):
+            item_id = self.result_tree.identify_row(event.y)
+            if item_id and item_id not in self.result_tree.selection():
+                self.result_tree.selection_set(item_id)
+            context_menu = tk.Menu(self, tearoff=0)
+            context_menu.add_command(label="選択した行の合計を計算",
+                                     command=self._calculate_selected_total)
+            context_menu.post(event.x_root, event.y_root)
+            return
         if region != "heading":
             return
         
@@ -203,6 +213,23 @@ class SearchDialog(BaseDialog):
         context_menu.add_command(label="全ての列幅をリセット",
                                  command=self._reset_all_column_widths)
         context_menu.post(event.x_root, event.y_root)
+
+    def _calculate_selected_total(self):
+        """選択された検索結果の金額を合計する。"""
+        selected = self.result_tree.selection()
+        if not selected:
+            messagebox.showwarning("選択なし", "合計する行を選択してください。", parent=self)
+            return
+        total = 0
+        for item_id in selected:
+            values = self.result_tree.item(item_id, "values")
+            if len(values) > 3:
+                total += parse_amount(values[3])
+        messagebox.showinfo(
+            "選択行の合計",
+            f"選択件数: {len(selected)} 件\n合計金額: ¥{total:,}",
+            parent=self
+        )
     
     def _reset_all_column_widths(self):
         """全ての列の幅をデフォルトにリセットする"""

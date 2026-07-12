@@ -5,6 +5,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
+import copy
 from ui.base_dialog import BaseDialog
 from config import DialogConfig, parse_amount
 
@@ -32,6 +33,10 @@ class TransactionDialog(BaseDialog):
         self.dict_key = dict_key
         self.col_name = col_name
         self.entry_editor = None
+        self._original_data = copy.deepcopy(
+            self.parent_app.data_manager.get_transaction_data(dict_key)
+        )
+        self._parent_undo_length = len(self.parent_app.undo_stack)
         
         # 自動補完用の変数
         self.autocomplete_candidates = []  # 現在の候補リスト
@@ -134,7 +139,7 @@ class TransactionDialog(BaseDialog):
         # キャンセルボタン
         cancel_btn = tk.Button(right_button_frame, text="キャンセル", font=('Arial', 12),
                                bg='#f44336', fg='white', relief='raised', bd=2,
-                               activebackground='#d32f2f', command=self.destroy)
+                               activebackground='#d32f2f', command=self._on_cancel)
         cancel_btn.pack(side=tk.RIGHT, padx=(10, 0), ipady=5)
         
         # OKボタン
@@ -160,7 +165,8 @@ class TransactionDialog(BaseDialog):
         
         # キーボードショートカット - ENTERキーの処理を変更
         self.bind('<Return>', self._on_enter_key)
-        self.bind('<Escape>', lambda e: self.destroy())
+        self.bind('<Escape>', lambda e: self._on_cancel())
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.tree.bind("<MouseWheel>", self._on_mousewheel)
         
         # データを読み込む
@@ -829,7 +835,7 @@ class TransactionDialog(BaseDialog):
     def _on_ok(self):
         """OKボタンの処理"""
         # 編集前のデータを保存（元に戻す用）
-        old_data = self.parent_app.data_manager.get_transaction_data(self.dict_key)
+        old_data = copy.deepcopy(self._original_data)
 
         # データを反映（メモリのみ）
         self._apply_changes_to_parent()
@@ -837,7 +843,32 @@ class TransactionDialog(BaseDialog):
         # データが変更されていればファイルに保存し、undo履歴に記録
         new_data = self.parent_app.data_manager.get_transaction_data(self.dict_key)
         if old_data != new_data:
+            # 編集中に作った中間履歴を捨て、ダイアログ全体を1操作として記録する。
+            del self.parent_app.undo_stack[self._parent_undo_length:]
             self.parent_app.data_manager.save_transaction(self.dict_key)
             self.parent_app._save_undo_state('edit_detail', [(self.dict_key, old_data[:] if old_data else None)])
+        else:
+            del self.parent_app.undo_stack[self._parent_undo_length:]
 
+        self.destroy()
+
+    def _on_cancel(self):
+        """ダイアログを開いた時点の状態へ戻して閉じる。"""
+        self._cancel_edit()
+        if self._original_data:
+            self.parent_app.data_manager.set_transaction_data(
+                self.dict_key, copy.deepcopy(self._original_data)
+            )
+        else:
+            self.parent_app.data_manager.delete_transaction_data(self.dict_key)
+
+        total = sum(
+            parse_amount(row[1]) for row in self._original_data if len(row) > 1
+        )
+        self.parent_app.update_parent_cell(
+            f"{self.year}-{self.month}-{self.day}",
+            self.col_index,
+            str(total) if total else ""
+        )
+        del self.parent_app.undo_stack[self._parent_undo_length:]
         self.destroy()

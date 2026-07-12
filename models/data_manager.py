@@ -6,6 +6,8 @@
 import json
 import os
 import shutil
+import csv
+import datetime
 
 
 class DataManager:
@@ -18,12 +20,10 @@ class DataManager:
         self.transaction_partners = set()  # 支払先の履歴
         
         # ファイルパスの設定
-        from config import JSON_DIR, SETTINGS_FILE, DATA_FILE, APP_VERSION
+        from config import JSON_DIR, SETTINGS_FILE, APP_VERSION
         
         self.JSON_DIR = JSON_DIR
         self.SETTINGS_FILE = SETTINGS_FILE
-        self.DATA_FILE = DATA_FILE  # 旧フォーマット
-        self.DATA_FILE_OLD = os.path.join(JSON_DIR, "data_1.json")  # 旧フォーマットバックアップ
         self.DATA_ROOT_DIR = os.path.join(JSON_DIR, "data")  # 新フォーマットのルート
         self.APP_VERSION = APP_VERSION
         
@@ -32,7 +32,7 @@ class DataManager:
     
     def _ensure_data_directory(self):
         """データ保存先のディレクトリが存在しない場合、作成する"""
-        # 旧データディレクトリ
+        # 設定・バックアップ用ディレクトリ
         if self.JSON_DIR and not os.path.exists(self.JSON_DIR):
             try:
                 os.makedirs(self.JSON_DIR, exist_ok=True)
@@ -79,7 +79,7 @@ class DataManager:
     
     @staticmethod
     def _to_new_format_transaction(col_index, transaction):
-        """内部形式の1取引を新ファイルフォーマットに変換する"""
+        """内部形式の1取引を月別JSON形式に変換する。"""
         return {
             "列目": str(col_index),
             "支払先": str(transaction[0]) if transaction[0] else "",
@@ -87,60 +87,21 @@ class DataManager:
             "詳細": str(transaction[2]) if transaction[2] else ""
         }
 
-    def _convert_old_to_new_format(self, old_data):
+    def _convert_file_to_internal_format(self, year, month, month_data):
         """
-        旧フォーマットのデータを新フォーマットに変換
-        
-        旧: "2026-1-14-7": [["apple", "150", "iCloud"]]
-        新: "2026-1-14": [{"列目": "7", "支払先": "apple", "金額": "150", "詳細": "iCloud"}]
-        
-        Args:
-            old_data: 旧フォーマットのデータ辞書
-            
-        Returns:
-            dict: 新フォーマットのデータ辞書 {year-month: {day: [transactions]}}
-        """
-        converted = {}
-        
-        for key, transactions in old_data.items():
-            parsed = self._parse_key(key)
-            if not parsed:
-                continue
-            
-            year, month, day, col_index = parsed
-            year_month_key = f"{year}-{month}"
-            day_key = str(day)
-            
-            if year_month_key not in converted:
-                converted[year_month_key] = {}
-            
-            if day_key not in converted[year_month_key]:
-                converted[year_month_key][day_key] = []
-            
-            # 各取引を新フォーマットに変換
-            for transaction in transactions:
-                if len(transaction) >= 3:
-                    converted[year_month_key][day_key].append(
-                        self._to_new_format_transaction(col_index, transaction)
-                    )
-        
-        return converted
-    
-    def _convert_new_to_old_format(self, year, month, new_data):
-        """
-        新フォーマットのデータを旧フォーマット(メモリ内部用)に変換
+        月別JSONのデータをメモリ内部用の辞書に変換する。
         
         Args:
             year: 年
             month: 月
-            new_data: 新フォーマットのデータ
+            month_data: 月別JSONの取引データ
             
         Returns:
-            dict: 旧フォーマットのデータ
+            dict: 内部用の取引データ
         """
-        old_format = {}
+        internal_data = {}
         
-        for day_key, transactions in new_data.items():
+        for day_key, transactions in month_data.items():
             # 日付ごとに列ごとにグループ化
             col_groups = {}
             
@@ -158,35 +119,23 @@ class DataManager:
                     transaction.get("詳細", "")
                 ])
             
-            # 旧フォーマットのキーで格納
+            # 日付と列を含む内部キーで格納
             for col_index, trans_list in col_groups.items():
-                old_key = f"{year}-{month}-{day_key}-{col_index}"
-                old_format[old_key] = trans_list
+                internal_key = f"{year}-{month}-{day_key}-{col_index}"
+                internal_data[internal_key] = trans_list
         
-        return old_format
+        return internal_data
     
     def load_data(self):
         """
         データファイルから家計データを読み込む
-        1. 新フォーマット(data/年/月/data.json)から読み込み
-        2. 旧フォーマット(data.json)があれば読み込んで変換・保存
-        3. data_1.jsonがあれば読み込み
+        月別JSONファイルから家計データを読み込む。
         """
         self.data = {}
-        
-        # 新フォーマットのデータを読み込み
         self._load_new_format_data()
-        
-        # 旧フォーマットのデータがあれば読み込み・変換
-        if os.path.exists(self.DATA_FILE):
-            self._migrate_old_format_data()
-        
-        # data_1.jsonからも読み込み
-        if os.path.exists(self.DATA_FILE_OLD):
-            self._load_old_backup_data()
     
     def _load_new_format_data(self):
-        """新フォーマットのデータを読み込み"""
+        """月別JSONのデータを読み込む。"""
         if not os.path.exists(self.DATA_ROOT_DIR):
             return
         
@@ -203,7 +152,7 @@ class DataManager:
             for entry_name in os.listdir(year_path):
                 entry_path = os.path.join(year_path, entry_name)
                 
-                # 新フォーマット: 2025_01.json のようなファイル
+                # 月別ファイル: 2025_01.json
                 if os.path.isfile(entry_path) and entry_name.endswith(".json"):
                     try:
                         base_name = os.path.splitext(entry_name)[0]  # "2025_01"
@@ -216,17 +165,6 @@ class DataManager:
                         continue
                     
                     self._load_month_file(entry_path, year, month)
-                
-                # 旧フォルダ形式: 01/data.json (互換性のため)
-                elif os.path.isdir(entry_path):
-                    try:
-                        month = int(entry_name)
-                    except ValueError:
-                        continue
-                    
-                    data_file = os.path.join(entry_path, "data.json")
-                    if os.path.exists(data_file):
-                        self._load_month_file(data_file, year, month)
 
     def _load_month_file(self, data_file, year, month):
         """月別データファイルを読み込んでメモリに展開する"""
@@ -234,10 +172,12 @@ class DataManager:
             with open(data_file, "r", encoding="utf-8") as f:
                 month_data = json.load(f)
             
-            old_format = self._convert_new_to_old_format(year, month, month_data.get("data", {}))
-            self.data.update(old_format)
+            internal_data = self._convert_file_to_internal_format(
+                year, month, month_data.get("data", {})
+            )
+            self.data.update(internal_data)
             
-            for data_list in old_format.values():
+            for data_list in internal_data.values():
                 for row in data_list:
                     if len(row) > 0 and row[0] and str(row[0]).strip():
                         self.transaction_partners.add(str(row[0]).strip())
@@ -245,59 +185,7 @@ class DataManager:
         except Exception as e:
             print(f"データ読み込みエラー ({year}/{month}): {e}")
     
-    def _migrate_old_format_data(self):
-        """旧フォーマットのデータを新フォーマットに移行"""
-        try:
-            with open(self.DATA_FILE, "r", encoding="utf-8") as f:
-                old_data = json.load(f)
-            
-            data_dict = old_data.get("data", {})
-
-            # 新フォーマットに変換
-            converted = self._convert_old_to_new_format(data_dict)
-            
-            # 年月ごとに保存
-            for year_month_key, month_data in converted.items():
-                try:
-                    year, month = map(int, year_month_key.split("-"))
-                    self._save_month_data(year, month, month_data)
-                except Exception as e:
-                    print(f"移行エラー ({year_month_key}): {e}")
-            
-            # 旧データをバックアップとしてリネーム
-            if not os.path.exists(self.DATA_FILE_OLD):
-                shutil.copy2(self.DATA_FILE, self.DATA_FILE_OLD)
-            
-            # 旧データファイルを削除(オプション)
-            # os.remove(self.DATA_FILE)
-            
-            print("旧フォーマットから新フォーマットへの移行が完了しました")
-            
-        except Exception as e:
-            print(f"旧データ移行エラー: {e}")
-    
-    def _load_old_backup_data(self):
-        """data_1.jsonからデータを読み込み"""
-        try:
-            with open(self.DATA_FILE_OLD, "r", encoding="utf-8") as f:
-                old_data = json.load(f)
-            
-            data_dict = old_data.get("data", {})
-
-            # 既存データとマージ(既存優先) + 支払先の抽出を同時に実行
-            for key, value in data_dict.items():
-                if key not in self.data:
-                    self.data[key] = value
-                    
-                    # マージ時に支払先を抽出（効率化）
-                    for row in value:
-                        if len(row) > 0 and row[0] and str(row[0]).strip():
-                            self.transaction_partners.add(str(row[0]).strip())
-            
-        except Exception as e:
-            print(f"data_1.json読み込みエラー: {e}")
-    
-    def _save_month_data(self, year, month, month_data):
+    def _save_month_data(self, year, month, month_data, replace=False):
         """
         指定された年月のデータを保存
         
@@ -308,10 +196,10 @@ class DataManager:
         """
         data_file = self._get_data_file_path(year, month)
         
-        # 既存データがあれば読み込んでマージ
+        # 通常は日単位でマージ。列削除時は月全体を完全置換する。
         existing_data = {}
         original_file_data = None
-        if os.path.exists(data_file):
+        if os.path.exists(data_file) and not replace:
             try:
                 with open(data_file, "r", encoding="utf-8") as f:
                     file_content = json.load(f)
@@ -321,7 +209,10 @@ class DataManager:
                 pass
 
         # データをマージ
-        existing_data.update(month_data)
+        if replace:
+            existing_data = month_data.copy()
+        else:
+            existing_data.update(month_data)
 
         # 保存
         save_data = {
@@ -347,7 +238,7 @@ class DataManager:
 
     def save_backup(self):
         """
-        全データを旧フォーマットのJSONファイルとしてbackupsフォルダに保存する。
+        全データを月別JSONと同じ取引形式でbackupsフォルダに保存する。
         フォルダ構造: backups/2026/12/11/data_143000.json
         30日以上前の日付フォルダを自動削除する。
         アプリ終了時に呼び出される。
@@ -375,9 +266,24 @@ class DataManager:
         
         # 時刻付きファイル名で保存
         backup_file = os.path.join(date_dir, f"data_{now.strftime('%H%M%S')}.json")
+        grouped_data = {}
+        for key, transactions in self.data.items():
+            parsed = self._parse_key(key)
+            if not parsed:
+                continue
+            year, month, day, col_index = parsed
+            month_key = f"{year}-{month}"
+            day_key = str(day)
+            grouped_data.setdefault(month_key, {}).setdefault(day_key, [])
+            for transaction in transactions:
+                if len(transaction) >= 3:
+                    grouped_data[month_key][day_key].append(
+                        self._to_new_format_transaction(col_index, transaction)
+                    )
+
         backup_data = {
             "version": self.APP_VERSION,
-            "data": self.data
+            "data": grouped_data
         }
         
         try:
@@ -601,18 +507,23 @@ class DataManager:
         return False
     
     def delete_column_data(self, col_index):
-        """指定された列の全データを削除"""
-        keys_to_delete = [key for key in self.data.keys()
-                          if key.split("-")[3] == str(col_index)]
-        
-        # 削除対象を年月でグループ化
+        """指定列を削除し、右側の列データを1列左へ移動する。"""
         year_month_set = set()
-        for key in keys_to_delete:
+        new_data = {}
+        for key, transactions in self.data.items():
             parsed = self._parse_key(key)
-            if parsed:
-                year, month, _, _ = parsed
+            if not parsed:
+                new_data[key] = transactions
+                continue
+            year, month, day, key_col = parsed
+            if key_col == col_index:
                 year_month_set.add((year, month))
-            del self.data[key]
+                continue
+            if key_col > col_index:
+                year_month_set.add((year, month))
+                key = f"{year}-{month}-{day}-{key_col - 1}"
+            new_data[key] = transactions
+        self.data = new_data
         
         # 影響を受けた年月のデータを保存
         for year, month in year_month_set:
@@ -632,7 +543,7 @@ class DataManager:
                                 self._to_new_format_transaction(col_idx, transaction)
                             )
             
-            self._save_month_data(year, month, month_data)
+            self._save_month_data(year, month, month_data, replace=True)
     
     def search_transactions(self, search_text):
         """取引データを検索"""
@@ -667,3 +578,133 @@ class DataManager:
                 continue
         
         return results
+
+    def export_csv(self, file_path, start, end, all_columns):
+        """指定年月範囲の取引をCSVへ出力する。"""
+        rows = []
+        for dict_key, data_list in self.data.items():
+            parsed = self._parse_key(dict_key)
+            if not parsed:
+                continue
+            year, month, day, col_index = parsed
+            if not start <= (year, month) <= end:
+                continue
+            if day == 0:
+                column_name = "収入"
+            elif 0 <= col_index < len(all_columns):
+                column_name = all_columns[col_index]
+            else:
+                column_name = f"列{col_index}"
+            for transaction in data_list:
+                if len(transaction) < 3:
+                    continue
+                rows.append([
+                    year, month, day, col_index, column_name,
+                    transaction[0], transaction[1], transaction[2]
+                ])
+
+        rows.sort(key=lambda row: (int(row[0]), int(row[1]), int(row[2]), int(row[3])))
+        with open(file_path, "w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(["年", "月", "日", "列番号", "項目", "支払先", "金額", "メモ"])
+            writer.writerows(rows)
+        return len(rows)
+
+    def import_csv(self, file_path, start, end, mode, column_count):
+        """
+        CSVを指定期間に追加または上書きする。
+
+        replaceは指定期間全体をCSVに含まれる取引で置き換える。
+        """
+        if mode not in ("append", "replace"):
+            raise ValueError("インポート方式が不正です。")
+
+        required = {"年", "月", "日", "列番号", "支払先", "金額", "メモ"}
+        imported = {}
+        row_count = 0
+        with open(file_path, "r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+            if not reader.fieldnames or not required.issubset(reader.fieldnames):
+                missing = "、".join(sorted(required - set(reader.fieldnames or [])))
+                raise ValueError(f"CSVの必須列がありません: {missing}")
+
+            for line_number, row in enumerate(reader, start=2):
+                try:
+                    year = int(row["年"])
+                    month = int(row["月"])
+                    day = int(row["日"])
+                    col_index = int(row["列番号"])
+                except (TypeError, ValueError):
+                    raise ValueError(f"{line_number}行目: 年・月・日・列番号は数値で指定してください。")
+
+                if not start <= (year, month) <= end:
+                    continue
+                if not 1 <= month <= 12:
+                    raise ValueError(f"{line_number}行目: 月は1～12で指定してください。")
+                if day == 0:
+                    if col_index != 3:
+                        raise ValueError(f"{line_number}行目: 収入データの列番号は3です。")
+                else:
+                    try:
+                        datetime.date(year, month, day)
+                    except ValueError:
+                        raise ValueError(f"{line_number}行目: 存在しない日付です。")
+                    if not 1 <= col_index < column_count:
+                        raise ValueError(f"{line_number}行目: 列番号{col_index}は現在の項目に存在しません。")
+
+                key = f"{year}-{month}-{day}-{col_index}"
+                imported.setdefault(key, []).append((
+                    row.get("支払先", ""), row.get("金額", ""), row.get("メモ", "")
+                ))
+                row_count += 1
+
+        affected_months = set(self._iter_months(start, end)) if mode == "replace" else {
+            self._parse_key(key)[:2] for key in imported
+        }
+        if mode == "replace":
+            self.data = {
+                key: value for key, value in self.data.items()
+                if not (self._parse_key(key) and start <= self._parse_key(key)[:2] <= end)
+            }
+
+        for key, rows in imported.items():
+            if mode == "append" and key in self.data:
+                self.data[key] = list(self.data[key]) + rows
+            else:
+                self.data[key] = rows
+            for partner, _, _ in rows:
+                if partner and str(partner).strip():
+                    self.transaction_partners.add(str(partner).strip())
+
+        for year, month in affected_months:
+            self._save_complete_month(year, month)
+        self.save_settings()
+        return row_count
+
+    @staticmethod
+    def _iter_months(start, end):
+        """開始年月から終了年月までを列挙する。"""
+        year, month = start
+        while (year, month) <= end:
+            yield year, month
+            month += 1
+            if month == 13:
+                year += 1
+                month = 1
+
+    def _save_complete_month(self, year, month):
+        """メモリ上の月データで月別JSONを完全上書きする。"""
+        month_data = {}
+        for key, transactions in self.data.items():
+            parsed = self._parse_key(key)
+            if not parsed or parsed[:2] != (year, month):
+                continue
+            _, _, day, col_index = parsed
+            day_key = str(day)
+            month_data.setdefault(day_key, [])
+            for transaction in transactions:
+                if len(transaction) >= 3:
+                    month_data[day_key].append(
+                        self._to_new_format_transaction(col_index, transaction)
+                    )
+        self._save_month_data(year, month, month_data, replace=True)

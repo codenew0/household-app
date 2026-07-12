@@ -20,8 +20,17 @@ def check_single_instance():
             with open(LOCK_FILE, 'r') as f:
                 pid = int(f.read().strip())
             # そのPIDのプロセスが実際に生きているか確認
-            import psutil
-            if psutil.pid_exists(pid):
+            try:
+                import psutil
+                process_is_running = psutil.pid_exists(pid)
+            except ImportError:
+                # psutilがない開発環境でも起動自体は可能にする。
+                try:
+                    os.kill(pid, 0)
+                    process_is_running = True
+                except (OSError, ProcessLookupError):
+                    process_is_running = False
+            if process_is_running:
                 return None  # 既に起動中
             # プロセスが死んでいれば古いロックファイルを無視
         
@@ -71,9 +80,8 @@ def main():
         import traceback
         traceback.print_exc()
     finally:
-        # アプリケーション終了時にソケットを閉じる
-        if instance_lock and hasattr(instance_lock, 'close'):
-            instance_lock.close()
+        # 正常終了・例外終了のどちらでもロックを解放する
+        release_lock(instance_lock)
 
 if __name__ == "__main__":
     main()

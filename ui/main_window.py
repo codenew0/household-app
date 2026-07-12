@@ -17,6 +17,7 @@ from ui.transaction_dialog import TransactionDialog
 from ui.monthly_data_dialog import MonthlyDataDialog
 from ui.search_dialog import SearchDialog
 from ui.chart_dialog import ChartDialog
+from ui.csv_dialog import CsvDialog
 from utils.date_utils import get_days_in_month
 import datetime
 import re
@@ -223,6 +224,9 @@ class MainWindow:
         
         # 図表ボタン
         self._create_chart_button(header_inner)
+
+        # CSV入出力ボタン
+        self._create_csv_button(header_inner)
         
         # 現在月表示(右側、クリック可能)
         self._create_current_month_button(header_inner)
@@ -294,6 +298,13 @@ class MainWindow:
         
         ttk.Button(chart_container, text="📊 図表", width=10, style='Accent.TButton',
                    command=lambda: ChartDialog(self.root, self)).pack()
+
+    def _create_csv_button(self, parent):
+        """CSVインポート・エクスポートボタンを作成する。"""
+        csv_container = tk.Frame(parent, bg=self.colors['bg_secondary'])
+        csv_container.pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(csv_container, text="CSV", width=7, style='Accent.TButton',
+                   command=lambda: CsvDialog(self.root, self)).pack()
     
     def _create_current_month_button(self, parent):
         """現在月表示ボタンを作成"""
@@ -1752,3 +1763,6 @@ class MainWindow:
                         y, m, d, col_idx = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
                         total = sum(parse_amount(row[1]) for row in old_data if len(row) > 1)
                         self.update_parent_cell(f"{y}-{m}-{d}", col_idx, str(total))
+
+        # Undo後の状態も即時保存し、強制終了時の巻き戻りを防ぐ。
+        self.data_manager.save_transactions([dict_key for dict_key, _ in cells])
