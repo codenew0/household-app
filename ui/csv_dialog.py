@@ -17,6 +17,7 @@ class CsvDialog(BaseDialog):
         self.parent_app = parent_app
         super().__init__(parent, "CSV インポート・エクスポート", 540, 330)
         self._create_widgets()
+        self.show_ready()
 
     def _create_widgets(self):
         now = datetime.date.today()

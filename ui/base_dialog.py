@@ -26,7 +26,10 @@ class BaseDialog(tk.Toplevel):
             width: ダイアログの幅(デフォルト: DialogConfig.DEFAULT_WIDTH)
             height: ダイアログの高さ(デフォルト: DialogConfig.DEFAULT_HEIGHT)
         """
+        parent = parent.winfo_toplevel()
         super().__init__(parent)
+        # 子クラスによる部品生成・サイズ変更が終わるまで表示しない。
+        self.withdraw()
         self.title(title)
         self.configure(bg='#f0f0f0')
         
@@ -36,24 +39,32 @@ class BaseDialog(tk.Toplevel):
         if height is None:
             height = DialogConfig.DEFAULT_HEIGHT
         
-        # ダイアログを親ウィンドウの中央に配置
-        self._center_on_parent(width, height)
+        # 位置は部品生成後に最終サイズで決める。
+        self.geometry(f"{width}x{height}")
+        self.minsize(int(width * DialogConfig.MIN_SIZE_RATIO), int(height * 0.67))
         
         # モーダルダイアログとして設定
         self.transient(parent)
-        self.grab_set()
         self.resizable(True, True)
-        
-        # ダイアログを前面に表示
+
+    def show_ready(self, initial_focus=None, modal=True):
+        """各ダイアログの初期化末尾で呼び、完成した画面だけを表示する。"""
+        # after_idleだと構築途中のupdate_idletasksでも発火するため、
+        # 表示タイミングは子クラスが明示する（図表の初期描画など）。
+        self.update_idletasks()
+        self._center_on_parent(self.winfo_width(), self.winfo_height())
+        self.update_idletasks()
+        self.deiconify()
+        if modal:
+            self.grab_set()
         self.lift()
-        self.focus_force()
+        (initial_focus if initial_focus is not None else self).focus_set()
     
     def _center_on_parent(self, width, height):
         """
         ダイアログを親ウィンドウの中央に配置する。
         
-        画面外にはみ出さないように位置を調整し、
-        ユーザーが見やすい位置に表示する。
+        画面中央ではなく、直接の親ウィンドウの中央を基準にする。
         """
         # 親ウィンドウの位置とサイズを取得
         parent_x = self.master.winfo_x()
@@ -68,10 +79,6 @@ class BaseDialog(tk.Toplevel):
         # ダイアログの位置とサイズを設定
         self.geometry(f"{width}x{height}+{x}+{y}")
         
-        # 最小サイズを設定(元のサイズの75%)
-        min_width = int(width * DialogConfig.MIN_SIZE_RATIO)
-        min_height = int(height * 0.67)
-        self.minsize(min_width, min_height)
 
     def navigate_to_cell(self, parent_app, day, col_index, delay=False):
         """

@@ -31,6 +31,7 @@ class SearchDialog(BaseDialog):
         super().__init__(parent, "検索")
         
         self._create_widgets()
+        self.show_ready(self.search_entry)
     
     def _create_widgets(self):
         """ダイアログ内のUI要素を作成する"""

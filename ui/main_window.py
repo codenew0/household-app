@@ -4,6 +4,7 @@
 家計管理アプリケーションのメインUI
 """
 import tkinter as tk
+from models.transactions import cash_amount, describe, normalize, is_pending, validate
 import json
 from tkinter import ttk, messagebox
 import tkinter.font as tkfont
@@ -18,6 +19,9 @@ from ui.monthly_data_dialog import MonthlyDataDialog
 from ui.search_dialog import SearchDialog
 from ui.chart_dialog import ChartDialog
 from ui.csv_dialog import CsvDialog
+from ui.subscription_dialog import SubscriptionDialog
+from ui.receipt_dialog import ReceiptDialog
+from ui.base_dialog import BaseDialog
 from utils.date_utils import get_days_in_month
 import datetime
 import re
@@ -70,6 +74,7 @@ class MainWindow:
         self._load_data()
         self._create_ui()
         self._show_month(self.current_month)
+        self._check_subscriptions()
         
         # ウィンドウクローズ時の処理を設定
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
@@ -98,6 +103,17 @@ class MainWindow:
             'border': ColorTheme.BORDER,
             'hover': ColorTheme.HOVER
         }
+
+    def _check_subscriptions(self):
+        try:
+            # 編集中のダイアログと自動生成が同じセルを更新しないようにする。
+            if self.root.grab_current() is None:
+                if self.data_manager.generate_due_subscriptions():
+                    self._show_month(self.current_month)
+        except (OSError, ValueError) as error:
+            messagebox.showerror('サブスク自動登録エラー', str(error), parent=self.root)
+        finally:
+            self.root.after(60000, self._check_subscriptions)
     
     def _setup_window(self):
         """メインウィンドウの基本設定を行う"""
@@ -202,6 +218,7 @@ class MainWindow:
     
     def _create_ui(self):
         """メインウィンドウのUI要素を作成する"""
+        self._create_menu()
         # メインコンテナ
         main_container = tk.Frame(self.root, bg=self.colors['bg_primary'])
         main_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -230,6 +247,10 @@ class MainWindow:
         
         # 現在月表示(右側、クリック可能)
         self._create_current_month_button(header_inner)
+
+        tk.Label(main_container, text='赤字・未確定は支出合計対象外。詳細画面のOKで確定します。',
+                 bg=self.colors['bg_primary'], fg=self.colors['text_secondary'],
+                 font=('Yu Gothic UI', 9), anchor='w').pack(fill=tk.X, pady=(0, 8))
         
         # メインテーブルセクション
         tree_section = tk.Frame(main_container, bg=self.colors['bg_secondary'])
@@ -237,6 +258,32 @@ class MainWindow:
         
         self._create_treeview(tree_section)
         self._update_month_buttons()
+
+    def _create_menu(self):
+        """機能を用途別にまとめたメニューバーを作成する。"""
+        self.menu_bar = tk.Menu(self.root)
+        sections = (
+            ('データ', (
+                ('CSVインポート・エクスポート…', CsvDialog, ''),
+            )),
+            ('入力・管理', (
+                ('レシートOCR…', ReceiptDialog, ''),
+                ('サブスクリプション…', SubscriptionDialog, ''),
+            )),
+            ('検索・分析', (
+                ('検索…', SearchDialog, 'Ctrl+F'),
+                ('図表…', ChartDialog, ''),
+            )),
+        )
+        for label, entries in sections:
+            menu = tk.Menu(self.menu_bar, tearoff=False)
+            for title, dialog, accelerator in entries:
+                menu.add_command(
+                    label=title, accelerator=accelerator,
+                    command=lambda dialog=dialog: dialog(self.root, self),
+                )
+            self.menu_bar.add_cascade(label=label, menu=menu)
+        self.root.configure(menu=self.menu_bar)
     
     def _create_year_controls(self, parent):
         """年選択コントロールを作成"""
@@ -385,6 +432,7 @@ class MainWindow:
         self._configure_treeview_style()
         
         # 行のタグ設定
+        self.tree.tag_configure('pending', foreground='red')
         self.tree.tag_configure(TreeviewConfig.TAG_TOTAL,
                                 background=TreeviewConfig.BG_TOTAL,
                                 font=FontConfig.HEADING)
@@ -418,8 +466,7 @@ class MainWindow:
     def _open_year_input_dialog(self, event=None):
         """年入力ダイアログを開く"""
         # ダイアログを作成
-        dialog = tk.Toplevel(self.root)
-        dialog.title("年を入力")
+        dialog = BaseDialog(self.root, "年を入力", 300, 150)
         dialog.resizable(False, False)
         
         # ダイアログのサイズと位置
@@ -433,7 +480,6 @@ class MainWindow:
         
         # モーダルダイアログに設定
         dialog.transient(self.root)
-        dialog.grab_set()
         
         # 背景色
         dialog.configure(bg='#f0f0f0')
@@ -512,6 +558,7 @@ class MainWindow:
         
         # Escapeキーでキャンセル
         dialog.bind('<Escape>', lambda e: on_cancel())
+        dialog.show_ready(year_entry)
     
     def _configure_treeview_style(self):
         """Treeviewのスタイルを設定"""
@@ -645,6 +692,7 @@ class MainWindow:
         days = self.get_days_in_month()
         
         # 各日のデータを表示
+        self.tree.tag_configure('pending', foreground='red')
         for day in range(1, days + 1):
             row_values = self._calculate_day_totals(day)
             formatted_values = self._format_row_values(row_values)
@@ -659,7 +707,10 @@ class MainWindow:
             else:
                 tag = TreeviewConfig.TAG_ODD if day % 2 == 1 else TreeviewConfig.TAG_NORMAL
 
-            self.tree.insert("", "end", values=formatted_values, tags=(tag,))
+            pending = any(is_pending(row) for col in range(1, len(all_columns))
+                          for row in self.data_manager.get_transaction_data(
+                              f'{self.current_year}-{self.current_month}-{day}-{col}'))
+            self.tree.insert("", "end", values=formatted_values, tags=('pending', tag) if pending else (tag,))
         
         # 合計行
         total_row = [" 合計 "] + ["  "] * (len(all_columns) - 1) + [""]
@@ -690,9 +741,11 @@ class MainWindow:
             data_list = self.data_manager.get_transaction_data(dict_key)
             if data_list:
                 # 金額列(インデックス1)を合計
-                total = sum(parse_amount(row[1]) for row in data_list if len(row) > 1)
+                total = sum(cash_amount(row) for row in data_list if len(row) > 1)
                 if total != 0:
                     totals[col_index] = str(total)
+                elif any(is_pending(row) for row in data_list):
+                    totals[col_index] = '未確定'
         
         return totals
     
@@ -711,7 +764,7 @@ class MainWindow:
         dict_key = f"{self.current_year}-{self.current_month}-0-3"
         data_list = self.data_manager.get_transaction_data(dict_key)
         if data_list:
-            return sum(parse_amount(row[1]) for row in data_list if len(row) > 1)
+            return sum(cash_amount(row) for row in data_list if len(row) > 1)
         return 0
     
     def _update_totals(self):
@@ -922,19 +975,12 @@ class MainWindow:
         # 取引詳細ダイアログを開く
         dict_key = f"{self.current_year}-{self.current_month}-{day}-{col_index}"
         
-        # ダイアログを開く前にデータを保存
-        old_data = self.data_manager.get_transaction_data(dict_key)
         
         # ダイアログを開く
         dialog = TransactionDialog(self.root, self, dict_key, col_name)
         
         # ダイアログが閉じた後、データが変更されていれば元に戻すスタックに保存
         self.root.wait_window(dialog)
-        new_data = self.data_manager.get_transaction_data(dict_key)
-        
-        # データが変更されていれば記録
-        if old_data != new_data:
-            self._save_undo_state('edit_detail', [(dict_key, old_data[:] if old_data else None)])
     
     def _on_right_click(self, event):
         """右クリックイベントを処理する"""
@@ -1079,8 +1125,7 @@ class MainWindow:
 
     def _add_column(self):
         """新しい列を追加する"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("列の追加")
+        dialog = BaseDialog(self.root, "列の追加", 300, 120)
         dialog.resizable(False, False)
         
         # ダイアログを中央に配置
@@ -1092,7 +1137,6 @@ class MainWindow:
         
         dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
         dialog.transient(self.root)
-        dialog.grab_set()
         
         tk.Label(dialog, text="新しい列名を入力してください:", font=('Arial', 11)).pack(pady=10)
         
@@ -1122,6 +1166,7 @@ class MainWindow:
         
         entry.bind('<Return>', lambda e: on_ok())
         dialog.bind('<Escape>', lambda e: dialog.destroy())
+        dialog.show_ready(entry)
 
     def _recreate_treeview(self):
         """Treeviewを再作成する"""
@@ -1146,8 +1191,7 @@ class MainWindow:
         old_name = self.data_manager.custom_columns[custom_index]
         
         # 編集ダイアログを表示
-        dialog = tk.Toplevel(self.root)
-        dialog.title("列名の編集")
+        dialog = BaseDialog(self.root, "列名の編集", 300, 120)
         dialog.resizable(False, False)
         
         dialog_width = 300
@@ -1158,7 +1202,6 @@ class MainWindow:
         
         dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
         dialog.transient(self.root)
-        dialog.grab_set()
         
         tk.Label(dialog, text="新しい列名を入力してください:", font=('Arial', 11)).pack(pady=10)
         
@@ -1190,6 +1233,7 @@ class MainWindow:
         
         entry.bind('<Return>', lambda e: on_ok())
         dialog.bind('<Escape>', lambda e: dialog.destroy())
+        dialog.show_ready(entry)
 
     def _delete_column(self):
         """カスタム列を削除する"""
@@ -1582,7 +1626,7 @@ class MainWindow:
                 # 既存データの確認（上書き）
                 self.data_manager.set_transaction_data(dict_key, new_data_list)
                 self.data_manager.save_transaction(dict_key)
-                total = sum(parse_amount(row[1]) for row in new_data_list if len(row) > 1)
+                total = sum(cash_amount(row) for row in new_data_list if len(row) > 1)
                 self.update_parent_cell(f"{self.current_year}-{self.current_month}-{base_day}", base_col_idx, str(total))
             return
         
@@ -1610,12 +1654,12 @@ class MainWindow:
                         safe_row = [str(v) for v in row]
                         while len(safe_row) < 3:
                             safe_row.append("")
-                        new_data_list.append(tuple(safe_row[:3]))
+                        new_data_list.append(tuple(safe_row[:7]))
                 
                 if new_data_list:
                     self.data_manager.set_transaction_data(dict_key, new_data_list)
                     self.data_manager.save_transaction(dict_key)
-                    total = sum(parse_amount(row[1]) for row in new_data_list if len(row) > 1)
+                    total = sum(cash_amount(row) for row in new_data_list if len(row) > 1)
                     self.update_parent_cell(f"{self.current_year}-{self.current_month}-{base_day}", base_col_idx, str(total))
             else:
                 # メインウィンドウからのデータ形式: [{"day": 1, "col_idx": 3, "data": [...]}, ...]
@@ -1654,7 +1698,7 @@ class MainWindow:
                     
                     if new_data:
                         self.data_manager.set_transaction_data(dict_key, new_data)
-                        total = sum(parse_amount(row[1]) for row in new_data if len(row) > 1)
+                        total = sum(cash_amount(row) for row in new_data if len(row) > 1)
                         self.update_parent_cell(f"{self.current_year}-{self.current_month}-{target_day}", target_col_idx, str(total))
                 
                 # Undo履歴に保存・ファイルに保存
@@ -1742,7 +1786,7 @@ class MainWindow:
                     parts = dict_key.split('-')
                     if len(parts) == 4:
                         y, m, d, col_idx = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
-                        total = sum(parse_amount(row[1]) for row in old_data if len(row) > 1)
+                        total = sum(cash_amount(row) for row in old_data if len(row) > 1)
                         self.update_parent_cell(f"{y}-{m}-{d}", col_idx, str(total))
         
         elif action == 'paste' or action == 'edit_detail':
@@ -1761,8 +1805,9 @@ class MainWindow:
                     parts = dict_key.split('-')
                     if len(parts) == 4:
                         y, m, d, col_idx = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
-                        total = sum(parse_amount(row[1]) for row in old_data if len(row) > 1)
+                        total = sum(cash_amount(row) for row in old_data if len(row) > 1)
                         self.update_parent_cell(f"{y}-{m}-{d}", col_idx, str(total))
 
         # Undo後の状態も即時保存し、強制終了時の巻き戻りを防ぐ。
         self.data_manager.save_transactions([dict_key for dict_key, _ in cells])
+        self._show_month(self.current_month)

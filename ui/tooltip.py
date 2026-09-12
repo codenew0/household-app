@@ -3,6 +3,7 @@
 Treeview用のツールチップ機能
 """
 import tkinter as tk
+from models.transactions import cash_amount, describe, normalize, is_pending, validate
 from config import parse_amount
 
 
@@ -109,10 +110,10 @@ class TreeviewTooltip:
             if len(row) >= 3:
                 partner = str(row[0]).strip() if row[0] else "(未入力)"
                 amount_str = str(row[1]).strip() if row[1] else "0"
-                detail = str(row[2]).strip() if row[2] else ""
+                detail = describe(row)
                 
                 try:
-                    amount = parse_amount(amount_str)
+                    amount = cash_amount(row)
                     total += amount
                     amount_display = f"¥{amount:,}"
                 except ValueError:
@@ -142,7 +143,7 @@ class TreeviewTooltip:
             dict_key = f"{self.parent_app.current_year}-{self.parent_app.current_month}-{day}-{col_index}"
             data_list = self.parent_app.data_manager.get_transaction_data(dict_key)
             if data_list:
-                day_total = sum(parse_amount(row[1]) for row in data_list if len(row) > 1)
+                day_total = sum(cash_amount(row) for row in data_list if len(row) > 1)
                 if day_total > 0:
                     days_with_data.append(f"{day}日: ¥{day_total:,}")
                     total += day_total
@@ -173,8 +174,8 @@ class TreeviewTooltip:
         for row in data_list:
             if len(row) >= 3:
                 source = str(row[0]).strip() if row[0] else "(未入力)"
-                amount = parse_amount(row[1])
-                detail = str(row[2]).strip() if row[2] else ""
+                amount = cash_amount(row)
+                detail = describe(row)
                 
                 total += amount
                 line = f"• {source}: ¥{amount:,}"
@@ -205,7 +206,7 @@ class TreeviewTooltip:
                 if data_list:
                     for row in data_list:
                         if len(row) > 1:
-                            column_total += parse_amount(row[1])
+                            column_total += cash_amount(row)
             
             if column_total > 0:
                 lines.append(f"• {column_name}: ¥{column_total:,}")

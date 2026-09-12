@@ -3,6 +3,7 @@
 項目別の月間推移グラフを表示するダイアログ
 """
 import tkinter as tk
+from models.transactions import cash_amount, describe, normalize, is_pending, validate
 from tkinter import ttk
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -37,6 +38,7 @@ class ChartDialog(BaseDialog):
         
         self._create_widgets()
         self._update_chart()
+        self.show_ready()
     
     def _get_available_years(self):
         """
@@ -309,7 +311,7 @@ class ChartDialog(BaseDialog):
                     
                     for row in data_list:
                         if len(row) > 1:
-                            amount = parse_amount(row[1])
+                            amount = cash_amount(row)
                             monthly_totals[month_key] += amount
             except (ValueError, IndexError):
                 continue
@@ -336,7 +338,7 @@ class ChartDialog(BaseDialog):
                     # まとめ行の収入列のみ対象
                     if day == 0 and col_index == 3:
                         month_key = date(year, month, 1)
-                        total_income = sum(parse_amount(row[1]) for row in data_list if len(row) > 1)
+                        total_income = sum(cash_amount(row) for row in data_list if len(row) > 1)
                         if total_income > 0:
                             monthly_totals[month_key] = total_income
             except (ValueError, IndexError):
@@ -371,7 +373,7 @@ class ChartDialog(BaseDialog):
                         
                         for row in data_list:
                             if len(row) > 1:
-                                amount = parse_amount(row[1])
+                                amount = cash_amount(row)
                                 monthly_totals[month_key] += amount
             except (ValueError, IndexError):
                 continue

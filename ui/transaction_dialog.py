@@ -3,10 +3,12 @@
 取引詳細を入力・編集するダイアログ
 """
 import tkinter as tk
+from models.transactions import cash_amount, describe, normalize, is_pending, validate
 from tkinter import ttk, messagebox
 import json
 import copy
 from ui.base_dialog import BaseDialog
+from ui.form_widgets import setup_form_styles, manage_payment_methods
 from config import DialogConfig, parse_amount
 
 
@@ -65,6 +67,7 @@ class TransactionDialog(BaseDialog):
                          DialogConfig.TRANSACTION_HEIGHT)
         
         self._create_widgets()
+        self.show_ready()
     
     def _create_widgets(self):
         """取引詳細ダイアログのUI要素を作成する"""
@@ -90,12 +93,18 @@ class TransactionDialog(BaseDialog):
 
 
         # 取引データ編集用Treeview
-        columns = ["支払先", "金額(円)", "メモ"]
-        self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode='extended')
+        columns = ["支払先", "金額(円)", "メモ", "ポイント", "支払方法", "状態", "自動登録ID"]
+        self.tree = ttk.Treeview(tree_container, columns=columns, displaycolumns=columns[:6], show="headings", selectmode='extended')
+        self.tree.tag_configure('pending', foreground='red')
+        self.tree.tag_configure('confirmed', foreground='black')
+        for column in columns[3:6]:
+            self.tree.heading(column, text=column)
+            self.tree.column(column, width=90, minwidth=60)
+        self.geometry('1000x550')
         
         # 列の設定
         self.tree.heading("支払先", text="支払先")
-        self.tree.heading("金額(円)", text="金額(円)")
+        self.tree.heading("金額(円)", text="利用前金額(円)")
         self.tree.heading("メモ", text="メモ")
         
         self.tree.column("支払先", anchor="center", width=150, minwidth=100)
@@ -131,6 +140,9 @@ class TransactionDialog(BaseDialog):
                             bg='#4caf50', fg='white', relief='raised', bd=2,
                             activebackground='#45a049', command=self._add_row)
         add_btn.pack(side=tk.LEFT, padx=(0, 10), ipady=5)
+        setup_form_styles(self)
+        ttk.Button(button_frame, text='支払方法の管理', style='Secondary.Form.TButton',
+                   command=lambda: manage_payment_methods(self, self.parent_app.data_manager)).pack(side=tk.LEFT)
         
         # 右側のボタングループ
         right_button_frame = tk.Frame(button_frame, bg='#f0f0f0')
@@ -159,7 +171,7 @@ class TransactionDialog(BaseDialog):
         self.context_menu.add_command(label="行を削除 (Delete)", command=self._delete_row)
         
         # 使用方法のヒント
-        hint_label = tk.Label(self, text="使い方: ダブルクリック/SPACEで編集、TABで自動補完/次のセル移動、ENTERで確定",
+        hint_label = tk.Label(self, text="支出＝ポイント利用前の金額 − 利用ポイント（1pt＝1円）。赤字は未確定・集計対象外。OKで確定します。",
                               font=('Arial', 10), fg='#666666', bg='#f0f0f0')
         hint_label.grid(row=3, column=0, pady=(5, 10))
         
@@ -170,7 +182,7 @@ class TransactionDialog(BaseDialog):
         self.tree.bind("<MouseWheel>", self._on_mousewheel)
         
         # データを読み込む
-        self.after(50, self._load_data)
+        self._load_data()
     
     # ENTERキーの処理
     def _on_enter_key(self, event):
@@ -208,7 +220,7 @@ class TransactionDialog(BaseDialog):
                 row_data = list(row) if row else ["", "", ""]
                 while len(row_data) < 3:
                     row_data.append("")
-                self.tree.insert("", "end", values=row_data)
+                self.tree.insert("", "end", values=normalize(row_data), tags=('pending' if is_pending(row_data) else 'confirmed',))
             
             # 最後に空行を追加(新規入力用)
             self.tree.insert("", "end", values=["", "", ""])
@@ -325,6 +337,9 @@ class TransactionDialog(BaseDialog):
             return
         
         col_idx = int(col_id[1:]) - 1
+        if col_idx >= 5:
+            return
+        self._editing_cell = (item_id, col_idx)
         values = list(self.tree.item(item_id, 'values'))
         
         while len(values) <= col_idx:
@@ -335,7 +350,11 @@ class TransactionDialog(BaseDialog):
         # 自動補完状態をリセット
         self._reset_autocomplete()
         
-        if col_idx == 0:  # 支払先列の場合
+        if col_idx == 4:
+            self.entry_editor = ttk.Combobox(self.tree, font=('Yu Gothic UI', 11), state='readonly')
+            self.entry_editor['values'] = list(dict.fromkeys([''] + self.parent_app.data_manager.payment_methods + [values[col_idx]]))
+            self.entry_editor.set(values[col_idx])
+        elif col_idx == 0:  # 支払先列の場合
             self.entry_editor = ttk.Combobox(self.tree, font=("Arial", 11))
             partner_list = self.parent_app.data_manager.get_transaction_partners_list()
             self.entry_editor['values'] = partner_list
@@ -429,13 +448,7 @@ class TransactionDialog(BaseDialog):
                 if len(self.undo_stack) > self.max_undo_count:
                     self.undo_stack.pop(0)
                 
-                # メインウィンドウにも保存（ダイアログを閉じた後用）
-                old_data = self.parent_app.data_manager.get_transaction_data(self.dict_key)
-                self.parent_app._save_undo_state('detail_edit', [(self.dict_key, old_data[:] if old_data else None)])
             
-            # 支払先の場合は履歴に追加
-            if col_idx == 0 and new_value.strip():
-                self.parent_app.data_manager.add_transaction_partner(new_value.strip())
             
             # Treeviewの値を更新
             values = list(self.tree.item(item_id, 'values'))
@@ -446,8 +459,6 @@ class TransactionDialog(BaseDialog):
             self.tree.item(item_id, values=values)
             
             # 値が変更されていれば即座にメインウィンドウに反映
-            if old_value != new_value:
-                self._apply_changes_to_parent()
             
             # 最終行に入力があったら新しい空行を追加
             all_items = self.tree.get_children()
@@ -631,7 +642,7 @@ class TransactionDialog(BaseDialog):
                         cell_data = cell.get('data', [])
                         for row in cell_data:
                             if len(row) >= 2:
-                                new_data.append(row[:3] if len(row) >= 3 else row + [""])
+                                new_data.append(normalize(row))
                 else:
                     # 詳細入力ウィンドウからのデータ形式
                     new_data = parsed
@@ -648,7 +659,7 @@ class TransactionDialog(BaseDialog):
                     # 3列になるように調整（支払先, 金額, メモ）
                     while len(cols) < 3:
                         cols.append("")
-                    new_data.append(cols[:3])
+                    new_data.append(normalize(cols[:5]))
 
         # 元に戻す用に貼り付け前の状態を保存
         if new_data:
@@ -671,13 +682,13 @@ class TransactionDialog(BaseDialog):
                     # 末尾が完全な空行なら、その手前に挿入
                     if last_vals and all(v == "" for v in last_vals):
                         insert_index = items.index(last_item)
-                        self.tree.insert("", insert_index, values=safe_row)
+                        self.tree.insert("", insert_index, values=safe_row, tags=('pending' if is_pending(safe_row) else 'confirmed',))
                     else:
                         insert_index = len(items)
-                        self.tree.insert("", "end", values=safe_row)
+                        self.tree.insert("", "end", values=safe_row, tags=('pending' if is_pending(safe_row) else 'confirmed',))
                     
                     # 元に戻す用にインデックスを記録
-                    undo_data.append((insert_index + insert_count, safe_row))
+                    undo_data.append((insert_index, safe_row))
                     insert_count += 1
             
             # 元に戻すスタックに保存
@@ -726,39 +737,6 @@ class TransactionDialog(BaseDialog):
         if len(self.undo_stack) > self.max_undo_count:
             self.undo_stack.pop(0)
 
-    def _apply_changes_to_parent(self):
-        """
-        現在のダイアログのデータをメインウィンドウに即座に反映
-        """
-        # すべての行データを収集
-        all_rows = []
-        for item_id in self.tree.get_children():
-            values = self.tree.item(item_id, 'values')
-            row = list(values)
-            while len(row) < 3:
-                row.append("")
-            all_rows.append(tuple(row))
-        
-        # 空行を除去
-        filtered_rows = [row for row in all_rows if any(str(cell).strip() for cell in row)]
-        
-        if not filtered_rows:
-            # データが空の場合
-            dict_key_day = f"{self.year}-{self.month}-{self.day}"
-            self.parent_app.update_parent_cell(dict_key_day, self.col_index, "")
-            self.parent_app.data_manager.delete_transaction_data(self.dict_key)
-        else:
-            # データがある場合
-            self.parent_app.data_manager.set_transaction_data(self.dict_key, filtered_rows)
-            
-            # 金額列(インデックス1)を合計
-            total = sum(parse_amount(row[1]) for row in filtered_rows if len(row) > 1)
-            
-            # 親セルを更新
-            dict_key_day = f"{self.year}-{self.month}-{self.day}"
-            display_value = str(total) if total != 0 else ""
-            self.parent_app.update_parent_cell(dict_key_day, self.col_index, display_value)
-    
     def _undo(self):
         """
         最後の操作を元に戻す (Ctrl+Z)
@@ -767,7 +745,16 @@ class TransactionDialog(BaseDialog):
             return
         
         undo_entry = self.undo_stack.pop()
-        undo_type = undo_entry['type']
+        undo_type = undo_entry.get('type', undo_entry.get('action'))
+        if undo_type in ('delete', 'cut'):
+            for index, values in sorted(undo_entry['rows']):
+                self.tree.insert('', index, values=values,
+                                 tags=('pending' if is_pending(values) else 'confirmed',))
+        elif undo_type == 'paste':
+            for index, values in sorted(undo_entry['rows'], reverse=True):
+                items = self.tree.get_children()
+                if index < len(items):
+                    self.tree.delete(items[index])
         
         if undo_type == 'edit':
             # セル編集の取り消し
@@ -781,14 +768,6 @@ class TransactionDialog(BaseDialog):
                 values[col_idx] = old_value
                 self.tree.item(item_id, values=values)
                 
-                # メインウィンドウにも反映
-                self._apply_changes_to_parent()
-                
-                # メインウィンドウの元に戻すスタックからも削除
-                if self.parent_app.undo_stack:
-                    last = self.parent_app.undo_stack[-1]
-                    if last['action'] == 'detail_edit':
-                        self.parent_app.undo_stack.pop()
             except:
                 pass
 
@@ -821,7 +800,7 @@ class TransactionDialog(BaseDialog):
                 row_data = list(row) if row else ["", "", ""]
                 while len(row_data) < 3:
                     row_data.append("")
-                self.tree.insert("", "end", values=row_data)
+                self.tree.insert("", "end", values=normalize(row_data), tags=('pending' if is_pending(row_data) else 'confirmed',))
             
             # 最後に空行を追加(新規入力用)
             self.tree.insert("", "end", values=["", "", ""])
@@ -834,22 +813,44 @@ class TransactionDialog(BaseDialog):
 
     def _on_ok(self):
         """OKボタンの処理"""
+        if self.entry_editor:
+            self._save_edit(*self._editing_cell)
+        rows = []
+        try:
+            for item in self.tree.get_children():
+                row = normalize(self.tree.item(item, 'values'))
+                if not any(row[:5]):
+                    continue
+                row = validate(row)
+                row[5] = ''
+                rows.append(row)
+        except ValueError as error:
+            messagebox.showwarning('入力エラー', str(error), parent=self)
+            return
         # 編集前のデータを保存（元に戻す用）
         old_data = copy.deepcopy(self._original_data)
 
         # データを反映（メモリのみ）
-        self._apply_changes_to_parent()
+        self.parent_app.data_manager.set_transaction_data(self.dict_key, rows)
 
         # データが変更されていればファイルに保存し、undo履歴に記録
         new_data = self.parent_app.data_manager.get_transaction_data(self.dict_key)
         if old_data != new_data:
             # 編集中に作った中間履歴を捨て、ダイアログ全体を1操作として記録する。
             del self.parent_app.undo_stack[self._parent_undo_length:]
-            self.parent_app.data_manager.save_transaction(self.dict_key)
+            try:
+                self.parent_app.data_manager.save_transaction(self.dict_key)
+            except OSError as error:
+                self.parent_app.data_manager.set_transaction_data(self.dict_key, old_data)
+                messagebox.showerror('保存エラー', str(error), parent=self)
+                return
             self.parent_app._save_undo_state('edit_detail', [(self.dict_key, old_data[:] if old_data else None)])
         else:
             del self.parent_app.undo_stack[self._parent_undo_length:]
 
+        self.parent_app.data_manager.transaction_partners.update(row[0] for row in rows if row[0])
+        self.parent_app.data_manager.save_settings()
+        self.parent_app._show_month(self.parent_app.current_month)
         self.destroy()
 
     def _on_cancel(self):
@@ -863,7 +864,7 @@ class TransactionDialog(BaseDialog):
             self.parent_app.data_manager.delete_transaction_data(self.dict_key)
 
         total = sum(
-            parse_amount(row[1]) for row in self._original_data if len(row) > 1
+            cash_amount(row) for row in self._original_data if len(row) > 1
         )
         self.parent_app.update_parent_cell(
             f"{self.year}-{self.month}-{self.day}",
@@ -871,4 +872,5 @@ class TransactionDialog(BaseDialog):
             str(total) if total else ""
         )
         del self.parent_app.undo_stack[self._parent_undo_length:]
+        self.parent_app._show_month(self.parent_app.current_month)
         self.destroy()

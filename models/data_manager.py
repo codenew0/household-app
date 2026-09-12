@@ -8,16 +8,38 @@ import os
 import shutil
 import csv
 import datetime
+import calendar
+import uuid
+import tempfile
+import copy
+from models.transactions import normalize, validate, PENDING, describe, cash_amount
 
 
 class DataManager:
     """家計データの管理を担当するクラス"""
+
+    @staticmethod
+    def _write_json(path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path), suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as file:
+                json.dump(data, file, ensure_ascii=False, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
     
     def __init__(self):
         """データマネージャーの初期化"""
         self.data = {}  # 詳細データを格納する辞書 {key: [[partner, amount, detail], ...]}
         self.custom_columns = []  # カスタム項目リスト
         self.transaction_partners = set()  # 支払先の履歴
+        self.subscriptions = []
+        self.payment_methods = ['現金', 'クレジットカード', 'デビットカード', 'PayPay', '電子マネー', '口座振替']
+        self.subscription_runs = set()
         
         # ファイルパスの設定
         from config import JSON_DIR, SETTINGS_FILE, APP_VERSION
@@ -80,11 +102,16 @@ class DataManager:
     @staticmethod
     def _to_new_format_transaction(col_index, transaction):
         """内部形式の1取引を月別JSON形式に変換する。"""
+        transaction = normalize(transaction)
         return {
             "列目": str(col_index),
             "支払先": str(transaction[0]) if transaction[0] else "",
             "金額": str(transaction[1]) if transaction[1] else "",
-            "詳細": str(transaction[2]) if transaction[2] else ""
+            "詳細": transaction[2],
+            "ポイント": transaction[3],
+            "支払方法": transaction[4],
+            "状態": transaction[5],
+            "自動登録ID": transaction[6]
         }
 
     def _convert_file_to_internal_format(self, year, month, month_data):
@@ -116,7 +143,11 @@ class DataManager:
                 col_groups[col_index].append([
                     transaction.get("支払先", ""),
                     transaction.get("金額", ""),
-                    transaction.get("詳細", "")
+                    transaction.get("詳細", ""),
+                    transaction.get("ポイント", ""),
+                    transaction.get("支払方法", ""),
+                    transaction.get("状態", ""),
+                    transaction.get("自動登録ID", "")
                 ])
             
             # 日付と列を含む内部キーで格納
@@ -205,8 +236,8 @@ class DataManager:
                     file_content = json.load(f)
                     existing_data = file_content.get("data", {})
                     original_file_data = file_content.get("data", {}).copy()
-            except:
-                pass
+            except (OSError, ValueError):
+                raise
 
         # データをマージ
         if replace:
@@ -226,11 +257,7 @@ class DataManager:
         if original_file_data is not None and original_file_data == existing_data:
             return
         
-        try:
-            with open(data_file, "w", encoding="utf-8") as f:
-                json.dump(save_data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"データ保存エラー ({year}/{month}): {e}")
+        self._write_json(data_file, save_data)
     
     def save_data(self):
         """全データを保存"""
@@ -283,7 +310,9 @@ class DataManager:
 
         backup_data = {
             "version": self.APP_VERSION,
-            "data": grouped_data
+            "data": grouped_data,
+            "subscriptions": self.subscriptions,
+            "subscription_runs": sorted(self.subscription_runs)
         }
         
         try:
@@ -426,6 +455,9 @@ class DataManager:
                     settings = json.load(f)
                     self.custom_columns = settings.get("custom_columns", [])
                     self.transaction_partners = set(settings.get("transaction_partners", []))
+                    self.subscriptions = settings.get("subscriptions", [])
+                    self.payment_methods = settings.get('payment_methods', self.payment_methods)
+                    self.subscription_runs = set(settings.get("subscription_runs", []))
             except Exception as e:
                 print(f"設定読み込みエラー: {e}")
     
@@ -433,17 +465,39 @@ class DataManager:
         """設定をファイルに保存する"""
         settings = {
             "custom_columns": self.custom_columns,
-            "transaction_partners": list(self.transaction_partners)
+            "transaction_partners": list(self.transaction_partners),
+            "subscriptions": self.subscriptions,
+            "payment_methods": self.payment_methods,
+            "subscription_runs": sorted(self.subscription_runs)
         }
-        try:
-            with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(settings, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"設定保存エラー: {e}")
+        self._write_json(self.SETTINGS_FILE, settings)
     
     def get_transaction_data(self, dict_key):
         """指定されたキーの取引データを取得"""
         return self.data.get(dict_key, [])
+
+    def add_payment_method(self, name):
+        name = name.strip()
+        if not name:
+            raise ValueError('支払方法の名前を入力してください。')
+        if name in self.payment_methods:
+            raise ValueError('同じ支払方法が登録されています。')
+        previous = self.payment_methods[:]
+        self.payment_methods.append(name)
+        try:
+            self.save_settings()
+        except OSError:
+            self.payment_methods = previous
+            raise
+
+    def remove_payment_method(self, name):
+        previous = self.payment_methods[:]
+        self.payment_methods = [method for method in previous if method != name]
+        try:
+            self.save_settings()
+        except OSError:
+            self.payment_methods = previous
+            raise
     
     def set_transaction_data(self, dict_key, data_list):
         """
@@ -560,7 +614,7 @@ class DataManager:
                         if len(row) >= 3:
                             partner = str(row[0]).strip() if row[0] else ""
                             amount = str(row[1]).strip() if row[1] else ""
-                            detail = str(row[2]).strip() if row[2] else ""
+                            detail = describe(row)
                             
                             if (search_text_lower in partner.lower() or
                                 search_text_lower in amount.lower() or
@@ -571,7 +625,7 @@ class DataManager:
                                     'day': day,
                                     'col_index': col_index,
                                     'partner': partner,
-                                    'amount': amount,
+                                    'amount': str(cash_amount(row)),
                                     'detail': detail
                                 })
             except (ValueError, IndexError):
@@ -600,15 +654,84 @@ class DataManager:
                     continue
                 rows.append([
                     year, month, day, col_index, column_name,
-                    transaction[0], transaction[1], transaction[2]
+                    *normalize(transaction)
                 ])
 
         rows.sort(key=lambda row: (int(row[0]), int(row[1]), int(row[2]), int(row[3])))
         with open(file_path, "w", encoding="utf-8-sig", newline="") as file:
             writer = csv.writer(file)
-            writer.writerow(["年", "月", "日", "列番号", "項目", "支払先", "金額", "メモ"])
+            writer.writerow(["年", "月", "日", "列番号", "項目", "支払先", "金額", "メモ", "ポイント", "支払方法", "状態", "自動登録ID"])
             writer.writerows(rows)
         return len(rows)
+
+    def save_subscription(self, name, partner, amount, day, method, start_date,
+                          subscription_id=None, enabled=True):
+        """毎月払いの定義を登録・更新する。既存明細には影響しない。"""
+        if not name.strip() or not partner.strip():
+            raise ValueError("名前と支払先を入力してください。")
+        day = int(day)
+        if not 1 <= day <= 31:
+            raise ValueError("支払日は1〜31で入力してください。")
+        start = datetime.date.fromisoformat(start_date)
+        amount = validate([partner, amount, ""])[1]
+        if int(amount) < 0:
+            raise ValueError("サブスク金額は0以上で入力してください。")
+        record = dict(id=subscription_id or uuid.uuid4().hex, name=name.strip(),
+                      partner=partner.strip(), amount=amount, day=day,
+                      method=method.strip(), start=start.isoformat(), enabled=enabled)
+        previous = self.subscriptions[:]
+        self.subscriptions = [s for s in previous if s['id'] != record['id']] + [record]
+        try:
+            self.save_settings()
+        except Exception:
+            self.subscriptions = previous
+            raise
+        return record
+
+    def generate_due_subscriptions(self, today=None):
+        """支払日到来分を1回だけ追加。削除した自動明細は再生成しない。"""
+        today = today or datetime.date.today()
+        previous_data = copy.deepcopy(self.data)
+        previous_runs = self.subscription_runs.copy()
+        seen = self.subscription_runs | {
+            str(row[6]) for rows in self.data.values() for row in rows
+            if len(row) > 6 and row[6]
+        }
+        affected = set()
+        generated = []
+        from config import DefaultColumns
+        column = DefaultColumns.ITEMS.index("サブスク")
+        for subscription in self.subscriptions:
+            if not subscription.get('enabled', True):
+                continue
+            start = datetime.date.fromisoformat(subscription['start'])
+            for year, month in self._iter_months((start.year, start.month), (today.year, today.month)):
+                day = min(subscription['day'], calendar.monthrange(year, month)[1])
+                due = datetime.date(year, month, day)
+                occurrence = f"{subscription['id']}:{year}-{month:02d}"
+                if due < start or due > today or occurrence in seen:
+                    continue
+                key = f"{year}-{month}-{day}-{column}"
+                row = [subscription['partner'], subscription['amount'], subscription['name'],
+                       "0", subscription['method'], PENDING, occurrence]
+                self.data.setdefault(key, []).append(row)
+                affected.add(key)
+                generated.append(occurrence)
+        # 月ファイルを先に保存。設定保存前の中断でも明細IDで重複を防げる。
+        try:
+            self.save_transactions(affected)
+        except Exception:
+            self.data = previous_data
+            raise
+        self.subscription_runs.update(seen)
+        self.subscription_runs.update(generated)
+        if self.subscription_runs != previous_runs:
+            try:
+                self.save_settings()
+            except Exception:
+                self.subscription_runs = previous_runs
+                raise
+        return len(generated)
 
     def import_csv(self, file_path, start, end, mode, column_count):
         """
@@ -653,9 +776,11 @@ class DataManager:
                         raise ValueError(f"{line_number}行目: 列番号{col_index}は現在の項目に存在しません。")
 
                 key = f"{year}-{month}-{day}-{col_index}"
-                imported.setdefault(key, []).append((
-                    row.get("支払先", ""), row.get("金額", ""), row.get("メモ", "")
-                ))
+                imported.setdefault(key, []).append(validate([
+                    row.get("支払先", ""), row.get("金額", ""), row.get("メモ", ""),
+                    row.get("ポイント", ""), row.get("支払方法", ""),
+                    row.get("状態", ""), row.get("自動登録ID", "")
+                ]))
                 row_count += 1
 
         affected_months = set(self._iter_months(start, end)) if mode == "replace" else {
@@ -672,7 +797,8 @@ class DataManager:
                 self.data[key] = list(self.data[key]) + rows
             else:
                 self.data[key] = rows
-            for partner, _, _ in rows:
+            for transaction in rows:
+                partner = transaction[0]
                 if partner and str(partner).strip():
                     self.transaction_partners.add(str(partner).strip())
 

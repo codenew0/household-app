@@ -3,6 +3,7 @@
 月間データの詳細を表示するダイアログ
 """
 import tkinter as tk
+from models.transactions import cash_amount, describe, normalize, is_pending, validate
 from tkinter import ttk
 from ui.base_dialog import BaseDialog
 from config import parse_amount
@@ -38,6 +39,7 @@ class MonthlyDataDialog(BaseDialog):
         
         self._create_widgets()
         self._load_monthly_data()
+        self.show_ready()
     
     def _create_widgets(self):
         """ダイアログ内のUI要素を作成する"""
@@ -297,10 +299,10 @@ class MonthlyDataDialog(BaseDialog):
                             if len(row) >= 3:
                                 partner = str(row[0]).strip() if row[0] else ""
                                 amount_str = str(row[1]).strip() if row[1] else ""
-                                detail = str(row[2]).strip() if row[2] else ""
+                                detail = describe(row)
 
                                 # 【修正箇所】ここです！ self._parse_amount ではなく parse_amount を使います
-                                amount_value = parse_amount(amount_str)
+                                amount_value = cash_amount(row)
 
                                 # 結果データを構造化
                                 result = {
