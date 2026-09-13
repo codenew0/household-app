@@ -34,8 +34,8 @@ DATA_ROOT_DIR = os.path.join(JSON_DIR, "data")
 # =====================================================
 # アプリケーションバージョン
 # =====================================================
-APP_VERSION = "2.0"
-APP_TITLE = "💰 家計管理 2025"
+APP_VERSION = "3.0"
+APP_TITLE = "💰 家計管理 2026"
 
 # =====================================================
 # ウィンドウ設定
@@ -174,20 +174,6 @@ def get_current_year():
 def get_current_month():
     """現在の月を取得"""
     return datetime.now().month
-
-def format_currency(amount):
-    """
-    金額をフォーマットする
-    
-    Args:
-        amount (int): 金額
-        
-    Returns:
-        str: フォーマット済み金額文字列
-    """
-    if amount == 0:
-        return ""
-    return f"¥{amount:,}"
 
 def parse_amount(amount_str):
     """

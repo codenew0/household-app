@@ -7,3 +7,4 @@ __pycache__/
 # データフォルダ（サンプルは除外しない）
 household_json/*
 !household_json/settings.sample.json
+tests/

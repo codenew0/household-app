@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,29 +21,6 @@ class DataManagerRegressionTests(unittest.TestCase):
         manager.DATA_ROOT_DIR = os.path.join(root, "data")
         os.makedirs(manager.DATA_ROOT_DIR, exist_ok=True)
         return manager
-
-    def test_delete_column_removes_it_and_shifts_columns_to_the_right(self):
-        with tempfile.TemporaryDirectory() as root:
-            manager = self.make_manager(root)
-            manager.data = {
-                "2026-7-1-12": [["A", "100", "deleted"]],
-                "2026-7-1-13": [["B", "200", "shifted"]],
-                "2026-7-2-12": [["A2", "300", "deleted-only-day"]],
-            }
-            manager._save_all_month_data()
-
-            manager.delete_column_data(12)
-
-            self.assertNotIn("2026-7-1-13", manager.data)
-            self.assertEqual(
-                manager.data["2026-7-1-12"], [["B", "200", "shifted"]]
-            )
-            path = manager._get_data_file_path(2026, 7)
-            with open(path, encoding="utf-8") as file:
-                saved = json.load(file)["data"]
-            self.assertNotIn("2", saved)
-            self.assertEqual(saved["1"][0]["列目"], "12")
-            self.assertEqual(saved["1"][0]["支払先"], "B")
 
     def test_legacy_root_files_are_ignored(self):
         with tempfile.TemporaryDirectory() as root:
@@ -93,6 +71,28 @@ class DataManagerRegressionTests(unittest.TestCase):
             self.assertIn("2026-8-1-1", manager.data)
             with open(manager._get_data_file_path(2026, 7), encoding="utf-8") as file:
                 self.assertEqual(json.load(file)["data"], {})
+
+    def test_csv_replace_rolls_memory_back_when_save_fails(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.make_manager(root)
+            manager.data = {'2026-7-1-1': [['old', '100', '']]}
+            csv_path = os.path.join(root, 'replace.csv')
+            with open(csv_path, 'w', encoding='utf-8-sig', newline='') as file:
+                file.write('年,月,日,列番号,項目,支払先,金額,メモ\n2026,7,1,1,A,new,200,\n')
+            with patch.object(manager, '_save_complete_month', side_effect=OSError('disk')):
+                with self.assertRaises(OSError):
+                    manager.import_csv(csv_path, (2026, 7), (2026, 7), 'replace', 3)
+            self.assertEqual(manager.data, {'2026-7-1-1': [['old', '100', '']]})
+
+    def test_remove_custom_column_updates_data_and_settings_together(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = self.make_manager(root)
+            manager.custom_columns = ['A', 'B']
+            manager.data = {'2026-7-1-12': [['A', '100', '']],
+                            '2026-7-1-13': [['B', '200', '']]}
+            manager.remove_custom_column('A')
+            self.assertEqual(manager.custom_columns, ['B'])
+            self.assertEqual(manager.data, {'2026-7-1-12': [['B', '200', '']]})
 
 if __name__ == "__main__":
     unittest.main()

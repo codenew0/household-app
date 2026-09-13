@@ -21,7 +21,7 @@ def setup_form_styles(widget):
                   foreground=[('disabled', '#94a3b8'), ('active', fg)])
 
 
-def scrollable_form(dialog):
+def scrollable_form(dialog, split_image=False):
     """フッター領域を先に確保し、長いフォームだけをスクロールさせる。"""
     setup_form_styles(dialog)
     dialog.configure(bg='#f5f7fb')
@@ -34,6 +34,14 @@ def scrollable_form(dialog):
     ttk.Separator(dialog).pack(side='bottom', fill='x')
     viewport = ttk.Frame(dialog, style='Form.TFrame')
     viewport.pack(fill='both', expand=True)
+    if split_image:
+        panes = ttk.Panedwindow(viewport, orient='horizontal')
+        panes.pack(fill='both', expand=True)
+        dialog.image_panel = ttk.Frame(panes, style='Form.TFrame', width=320)
+        right = ttk.Frame(panes, style='Form.TFrame', width=650)
+        panes.add(dialog.image_panel, weight=1)
+        panes.add(right, weight=2)
+        viewport = right
     canvas = tk.Canvas(viewport, bg='#f5f7fb', highlightthickness=0)
     scrollbar = ttk.Scrollbar(viewport, orient='vertical', command=canvas.yview)
     scrollbar.pack(side='right', fill='y')
@@ -54,6 +62,8 @@ def scrollable_form(dialog):
 
 def polish_form(widget):
     for child in widget.winfo_children():
+        if getattr(child, 'preserve_styles', False):
+            continue
         if isinstance(child, ttk.Button):
             text = child.cget('text')
             kind = 'Danger' if '削除' in text else 'Primary' if any(w in text for w in ('保存', '登録', '追加', '読み込む')) else 'Secondary'

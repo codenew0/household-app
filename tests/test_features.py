@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from models.data_manager import DataManager
+from models.clipboard import decode_clipboard, PLAIN_AMOUNT, DETAIL_ROWS, CELL_BLOCK
 from models.transactions import cash_amount, normalize, PENDING, validate
 
 
@@ -17,8 +18,12 @@ class FeatureTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root_dir = self.directory.name
-        self.patch = patch.multiple(config, JSON_DIR=self.root_dir,
-                                    SETTINGS_FILE=os.path.join(self.root_dir, 'settings.json'))
+        self.patch = patch.multiple(
+            config,
+            JSON_DIR=self.root_dir,
+            SETTINGS_FILE=os.path.join(self.root_dir, 'settings.json'),
+            DATA_ROOT_DIR=os.path.join(self.root_dir, 'data'),
+        )
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.manager = DataManager()
@@ -55,6 +60,16 @@ class FeatureTests(unittest.TestCase):
         self.manager.subscriptions[0]['enabled'] = False
         self.assertEqual(self.manager.generate_due_subscriptions(datetime.date(2024, 5, 31)), 0)
 
+    def test_reenabled_subscription_does_not_backfill_disabled_months(self):
+        item = self.manager.save_subscription('動画', '店', '100', 1, '', '2026-01-01')
+        self.manager.generate_due_subscriptions(datetime.date(2026, 1, 1))
+        item['enabled'] = False
+        self.manager.generate_due_subscriptions(datetime.date(2026, 3, 1))
+        item['enabled'] = True
+        self.assertEqual(self.manager.generate_due_subscriptions(datetime.date(2026, 4, 1)), 1)
+        self.assertNotIn('2026-2-1-7', self.manager.data)
+        self.assertNotIn('2026-3-1-7', self.manager.data)
+
     def test_points_pending_json_csv_roundtrip(self):
         rows = [['店', '1000', '商品', '200', 'カード', '', ''],
                 ['動画', '1000', '契約', '0', 'カード', PENDING, 'id:2026-07']]
@@ -68,6 +83,12 @@ class FeatureTests(unittest.TestCase):
         self.manager.import_csv(path, (2026, 7), (2026, 7), 'replace', 12)
         self.assertEqual(self.manager.data['2026-7-1-7'], rows)
         self.assertEqual(sum(int(item['amount']) for item in self.manager.search_transactions('')), 800)
+        results = self.manager.search_transactions('カード')
+        self.assertEqual(results[0]['gross_amount'], '1000')
+        self.assertEqual(results[0]['points'], '200')
+        self.assertEqual(results[0]['payment_method'], 'カード')
+        self.assertEqual(results[0]['memo'], '商品')
+        self.assertEqual(results[1]['status'], PENDING)
 
     def test_save_failure_does_not_mark_occurrence_generated(self):
         self.subscription()
@@ -77,6 +98,33 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(self.manager.data, {})
         self.assertEqual(self.manager.subscription_runs, set())
         self.assertEqual(self.manager.generate_due_subscriptions(datetime.date(2026, 1, 31)), 1)
+
+    def test_recurring_payment_interval_category_and_start_anchor(self):
+        self.manager.save_subscription(
+            '水道', '水道局', '3000', 10, '口座振替', '2026-01-20',
+            kind='公共料金', category='光熱・通信', interval_months=3)
+        self.assertEqual(self.manager.generate_due_subscriptions(datetime.date(2026, 7, 31)), 2)
+        self.assertIn('2026-4-10-9', self.manager.data)
+        self.assertIn('2026-7-10-9', self.manager.data)
+        self.assertNotIn('2026-1-10-9', self.manager.data)
+
+    def test_installment_stops_at_count_and_records_progress(self):
+        self.manager.save_subscription(
+            'パソコン', '家電店', '10000', 15, 'カード', '2026-01-01',
+            kind='分割払い', category='通販', interval_months=1, payment_count=3)
+        self.assertEqual(self.manager.generate_due_subscriptions(datetime.date(2026, 12, 31)), 3)
+        memos = [row[2] for rows in self.manager.data.values() for row in rows]
+        self.assertEqual(memos, ['パソコン (1/3回)', 'パソコン (2/3回)', 'パソコン (3/3回)'])
+
+    def test_installment_requires_count_and_legacy_subscription_defaults(self):
+        with self.assertRaises(ValueError):
+            self.manager.save_subscription(
+                '端末', '店', '1000', 1, 'カード', '2026-01-01', kind='分割払い')
+        legacy = {'id': 'old', 'name': '動画', 'partner': '店', 'amount': '500',
+                  'day': 1, 'method': 'カード', 'start': '2026-01-01', 'enabled': True}
+        values = self.manager.recurring_payment_values(legacy)
+        self.assertEqual((values['kind'], values['category'], values['interval_months']),
+                         ('サブスクリプション', 'サブスク', 1))
 
     def test_old_three_field_rows_still_count_cash(self):
         self.assertEqual(cash_amount(['店', '1200', 'メモ']), 1200)
@@ -103,6 +151,17 @@ class FeatureTests(unittest.TestCase):
             validate(['店', '1000', '商品', '1001'])
         with self.assertRaises(ValueError):
             validate(['店', '1000', '商品', '-1'])
+
+    def test_clipboard_formats_are_validated(self):
+        kind, rows = decode_clipboard('1,200')
+        self.assertEqual((kind, rows[0][1]), (PLAIN_AMOUNT, '1200'))
+        kind, rows = decode_clipboard('[["店", "500", "メモ"]]')
+        self.assertEqual((kind, rows[0][:3]), (DETAIL_ROWS, ['店', '500', 'メモ']))
+        kind, cells = decode_clipboard(
+            '[{"day": 1, "col_idx": 2, "data": [["店", "300", ""]]}]')
+        self.assertEqual((kind, cells[0]['data'][0][1]), (CELL_BLOCK, '300'))
+        with self.assertRaises(ValueError):
+            decode_clipboard('[{"day": "1", "col_idx": 2, "data": []}]')
 
 
 if __name__ == '__main__':

@@ -16,12 +16,20 @@ class ReceiptDialog(BaseDialog):
     def __init__(self, parent, app):
         super().__init__(parent, 'レシートOCR', 980, 720)
         self.app = app
-        self.body, self.footer = scrollable_form(self)
+        self.body, self.footer = scrollable_form(self, split_image=True)
+        self.geometry(f'{min(1400, self.winfo_screenwidth() - 80)}x{min(850, self.winfo_screenheight() - 100)}')
         self.staged = []
         self.results = queue.Queue()
         self.ocr_items = []
         self.source_image = None
         self.ocr_result = None
+        ttk.Label(self.image_panel, text='元画像 / 選択した商品の行を拡大').pack(anchor='w', padx=8, pady=8)
+        self.image_canvas = tk.Canvas(self.image_panel, highlightthickness=0, bg='#e2e8f0')
+        image_scroll = ttk.Scrollbar(self.image_panel, orient='vertical', command=self.image_canvas.yview)
+        image_scroll.pack(side='right', fill='y')
+        self.image_canvas.pack(fill='both', expand=True, padx=4)
+        self.image_canvas.configure(yscrollcommand=image_scroll.set)
+        self.image_canvas.bind('<Configure>', lambda event: self.render_image())
         bar = ttk.Frame(self.body)
         bar.pack(fill='x', padx=12, pady=10)
         self.load_button = ttk.Button(bar, text='レシート画像を読み込む', command=self.load_image)
@@ -35,28 +43,29 @@ class ReceiptDialog(BaseDialog):
             self.lines.column(key, width=width)
         self.lines.pack(fill='both', expand=True, padx=12)
         self.lines.bind('<<TreeviewSelect>>', self.select_line)
-        self.source_preview = ttk.Label(self.body, text='商品を選択すると元画像の該当行を表示します。')
+        self.source_preview = ttk.Label(self.image_panel, text='商品を選択すると該当行を拡大します。')
         self.source_preview.pack(fill='x', padx=12, pady=5)
         ttk.Button(self.body, text='認識した全文・その他の行を表示', command=self.show_raw).pack(anchor='e', padx=12)
         form = ttk.Frame(self.body)
         form.pack(fill='x', padx=12, pady=10)
-        for column in range(3):
+        for column in range(2):
             form.columnconfigure(column, weight=1, uniform='fields')
         self.fields = {}
         for index, (key, title) in enumerate((('date', '日付 YYYY-MM-DD'), ('partner', '支払先'),
                                              ('amount', 'ポイント利用前の金額（円）'), ('points', '利用ポイント（1pt＝1円）'),
                                              ('method', '支払方法'), ('memo', '詳細（メモ）'))):
-            ttk.Label(form, text=title).grid(row=index // 3 * 2, column=index % 3, sticky='w')
+            ttk.Label(form, text=title).grid(row=index // 2 * 2, column=index % 2, sticky='w')
             entry = PaymentMethodPicker(form, app.data_manager) if key == 'method' else ttk.Entry(form, width=28)
-            entry.grid(row=index // 3 * 2 + 1, column=index % 3, sticky='ew', padx=4, pady=4)
+            entry.grid(row=index // 2 * 2 + 1, column=index % 2, sticky='ew', padx=4, pady=4)
             self.fields[key] = entry
         self.fields['date'].insert(0, datetime.date.today().isoformat())
         self.fields['points'].insert(0, '0')
         self.category = ttk.Combobox(form, values=app.get_all_columns()[1:], state='readonly', width=30)
         self.category.current(0)
-        ttk.Label(form, text='分類').grid(row=4, column=0, sticky='w')
-        self.category.grid(row=5, column=0, sticky='w')
-        ttk.Button(form, text='確認した明細を追加 ↓', command=self.add_row).grid(row=5, column=1)
+        ttk.Label(form, text='分類').grid(row=6, column=0, sticky='w')
+        self.category.grid(row=7, column=0, sticky='w')
+        ttk.Button(form, text='確認した明細を追加 ↓', command=self.add_row).grid(row=7, column=1)
+        ttk.Button(form, text='支払先から分類・支払方法を提案', command=self.suggest_partner).grid(row=8, column=0, columnspan=2, pady=8)
         self.preview = ttk.Treeview(self.body, columns=('date', 'category', 'partner', 'amount', 'points', 'memo'), show='headings', height=7)
         for name, title in zip(self.preview['columns'], ('日付', '分類', '支払先', '利用前金額', 'ポイント', 'メモ')):
             self.preview.heading(name, text=title)
@@ -78,6 +87,7 @@ class ReceiptDialog(BaseDialog):
         try:
             with Image.open(path) as image:
                 self.source_image = ImageOps.exif_transpose(image).copy()
+            self.render_image()
         except OSError as error:
             messagebox.showerror('画像エラー', str(error), parent=self)
             return
@@ -133,13 +143,41 @@ class ReceiptDialog(BaseDialog):
         self.fields['points'].insert(0, '0')
         if self.source_image is not None:
             bounds = item['bounds']
-            sx = self.source_image.width / self.ocr_result['width']
             sy = self.source_image.height / self.ocr_result['height']
             crop = self.source_image.crop((0, int(bounds['y'] * sy), self.source_image.width,
                                            int((bounds['y'] + bounds['height']) * sy)))
-            crop.thumbnail((930, 100))
+            crop.thumbnail((max(250, self.image_panel.winfo_width() - 20), 130))
             self.preview_image = ImageTk.PhotoImage(crop)
             self.source_preview.configure(image=self.preview_image, text='')
+            self.render_image(item)
+
+    def render_image(self, selected=None):
+        if self.source_image is None:
+            return
+        width = max(180, self.image_canvas.winfo_width() - 10)
+        scale = width / self.source_image.width
+        image = self.source_image.resize((width, max(1, round(self.source_image.height * scale))))
+        self.full_preview_image = ImageTk.PhotoImage(image)
+        self.image_canvas.delete('all')
+        self.image_canvas.create_image(0, 0, anchor='nw', image=self.full_preview_image)
+        self.image_canvas.configure(scrollregion=(0, 0, image.width, image.height))
+        if selected and self.ocr_result:
+            bounds = selected['bounds']
+            top = bounds['y'] * self.source_image.height / self.ocr_result['height'] * scale
+            height = bounds['height'] * self.source_image.height / self.ocr_result['height'] * scale
+            self.image_canvas.create_rectangle(1, top, width - 1, top + height, outline='#2563eb', width=3)
+            self.image_canvas.yview_moveto(max(0, (top - 50) / image.height))
+
+    def suggest_partner(self):
+        suggestion = self.app.data_manager.partner_suggestion(self.fields['partner'].get())
+        if not suggestion:
+            messagebox.showinfo('入力候補', 'この支払先の確定済み履歴がありません。', parent=self)
+            return
+        column, method = suggestion
+        columns = self.app.get_all_columns()
+        if 1 <= column < len(columns) and messagebox.askyesno('入力候補', f'分類: {columns[column]}\n支払方法: {method}\n反映しますか？', parent=self):
+            self.category.current(column - 1)
+            self.fields['method'].set(method)
 
     def show_raw(self):
         if not self.ocr_result:
@@ -179,17 +217,24 @@ class ReceiptDialog(BaseDialog):
         manager = self.app.data_manager
         keys = {key for _, key, _ in self.staged}
         old = [(key, copy.deepcopy(manager.get_transaction_data(key)) or None) for key in keys]
+        previous_partners = manager.transaction_partners.copy()
         for _, key, row in self.staged:
             manager.set_transaction_data(key, list(manager.get_transaction_data(key)) + [row])
         try:
             manager.save_transactions(keys)
+            manager.transaction_partners.update(row[0] for _, _, row in self.staged)
+            manager.save_settings()
         except OSError as error:
-            messagebox.showerror('保存エラー', f'保存できませんでした。再試行の前に保存先を確認してください。\n{error}', parent=self)
             for key, rows in old:
                 manager.set_transaction_data(key, rows or [])
+            manager.transaction_partners = previous_partners
+            try:
+                manager.save_transactions(keys, create_snapshot=False)
+                manager.save_settings()
+            except OSError:
+                pass
+            messagebox.showerror('保存エラー', f'保存できませんでした。再試行の前に保存先を確認してください。\n{error}', parent=self)
             return
-        manager.transaction_partners.update(row[0] for _, _, row in self.staged)
-        manager.save_settings()
         self.app._save_undo_state('paste', old)
         self.app._show_month(self.app.current_month)
         self.destroy()

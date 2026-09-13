@@ -3,14 +3,14 @@
 項目別の月間推移グラフを表示するダイアログ
 """
 import tkinter as tk
-from models.transactions import cash_amount, describe, normalize, is_pending, validate
+from models.transactions import cash_amount
 from tkinter import ttk
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from datetime import date
 from ui.base_dialog import BaseDialog
-from config import DialogConfig, parse_amount
+from config import DialogConfig, DefaultColumns
 from utils.font_utils import setup_japanese_font
 
 
@@ -117,19 +117,26 @@ class ChartDialog(BaseDialog):
         all_columns = self.parent_app.get_all_columns()
         self.tab_buttons = []
         
-        tab_canvas = tk.Canvas(tab_frame, height=35, bg='#f0f0f0', highlightthickness=0)
-        tab_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tab_area = tk.Frame(tab_frame, bg='#f0f0f0')
+        tab_area.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tab_canvas = tk.Canvas(tab_area, height=35, bg='#f0f0f0', highlightthickness=0)
+        tab_canvas.pack(side=tk.TOP, fill=tk.X, expand=True)
+        tab_scrollbar = ttk.Scrollbar(tab_area, orient=tk.HORIZONTAL, command=tab_canvas.xview)
+        tab_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        tab_canvas.configure(xscrollcommand=tab_scrollbar.set)
+        tab_canvas.bind('<Shift-MouseWheel>',
+                        lambda event: tab_canvas.xview_scroll(-int(event.delta / 120), 'units'))
         
         tab_inner_frame = tk.Frame(tab_canvas, bg='#f0f0f0')
         tab_canvas.create_window((0, 0), window=tab_inner_frame, anchor="nw")
         
         # 各項目のタブボタンを作成(日付列を除く)
-        for i, col_name in enumerate(all_columns[1:], start=1):
+        for column_index, col_name in enumerate(all_columns[1:], start=1):
             btn = tk.Button(tab_inner_frame, text=col_name,
                             font=('Arial', 10),
                             bg='#e0e0e0', fg='black',
                             relief='raised', bd=2,
-                            command=lambda idx=i: self._select_tab(idx))
+                            command=lambda index=column_index: self._select_tab(index))
             btn.pack(side=tk.LEFT, padx=2, pady=2, fill=tk.Y)
             self.tab_buttons.append(btn)
         
@@ -336,7 +343,7 @@ class ChartDialog(BaseDialog):
                         continue
                     
                     # まとめ行の収入列のみ対象
-                    if day == 0 and col_index == 3:
+                    if day == 0 and col_index == DefaultColumns.INCOME_COLUMN_INDEX:
                         month_key = date(year, month, 1)
                         total_income = sum(cash_amount(row) for row in data_list if len(row) > 1)
                         if total_income > 0:

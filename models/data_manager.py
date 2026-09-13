@@ -13,9 +13,18 @@ import uuid
 import tempfile
 import copy
 from models.transactions import normalize, validate, PENDING, describe, cash_amount
+from models.productivity import ProductivityMixin
+from config import DefaultColumns
 
 
-class DataManager:
+CSV_COLUMNS = (
+    "年", "月", "日", "列番号", "項目", "支払先", "金額", "メモ",
+    "ポイント", "支払方法", "状態", "自動登録ID",
+)
+CSV_REQUIRED_COLUMNS = {"年", "月", "日", "列番号", "支払先", "金額", "メモ"}
+
+
+class DataManager(ProductivityMixin):
     """家計データの管理を担当するクラス"""
 
     @staticmethod
@@ -40,13 +49,15 @@ class DataManager:
         self.subscriptions = []
         self.payment_methods = ['現金', 'クレジットカード', 'デビットカード', 'PayPay', '電子マネー', '口座振替']
         self.subscription_runs = set()
+        self.budgets = {}
+        self.load_warnings = []
         
         # ファイルパスの設定
-        from config import JSON_DIR, SETTINGS_FILE, APP_VERSION
+        from config import JSON_DIR, SETTINGS_FILE, DATA_ROOT_DIR, APP_VERSION
         
         self.JSON_DIR = JSON_DIR
         self.SETTINGS_FILE = SETTINGS_FILE
-        self.DATA_ROOT_DIR = os.path.join(JSON_DIR, "data")  # 新フォーマットのルート
+        self.DATA_ROOT_DIR = DATA_ROOT_DIR
         self.APP_VERSION = APP_VERSION
         
         # 初期化時にデータフォルダの存在を確認・作成する
@@ -215,6 +226,7 @@ class DataManager:
                 
         except Exception as e:
             print(f"データ読み込みエラー ({year}/{month}): {e}")
+            self.load_warnings.append(f'{year}年{month}月の明細を読み込めませんでした: {e}')
     
     def _save_month_data(self, year, month, month_data, replace=False):
         """
@@ -273,9 +285,7 @@ class DataManager:
         if not self.data:
             return
         
-        from datetime import datetime, timedelta
-        
-        now = datetime.now()
+        now = datetime.datetime.now()
         backup_root = os.path.join(self.JSON_DIR, "backups")
         
         # 今日の日付フォルダを作成: backups/2026/12/11/
@@ -293,20 +303,10 @@ class DataManager:
         
         # 時刻付きファイル名で保存
         backup_file = os.path.join(date_dir, f"data_{now.strftime('%H%M%S')}.json")
-        grouped_data = {}
-        for key, transactions in self.data.items():
-            parsed = self._parse_key(key)
-            if not parsed:
-                continue
-            year, month, day, col_index = parsed
-            month_key = f"{year}-{month}"
-            day_key = str(day)
-            grouped_data.setdefault(month_key, {}).setdefault(day_key, [])
-            for transaction in transactions:
-                if len(transaction) >= 3:
-                    grouped_data[month_key][day_key].append(
-                        self._to_new_format_transaction(col_index, transaction)
-                    )
+        grouped_data = {
+            f"{year}-{month}": month_data
+            for (year, month), month_data in self._group_data_by_month().items()
+        }
 
         backup_data = {
             "version": self.APP_VERSION,
@@ -316,15 +316,19 @@ class DataManager:
         }
         
         try:
-            with open(backup_file, "w", encoding="utf-8") as f:
-                json.dump(backup_data, f, ensure_ascii=False, indent=2)
+            self._write_json(backup_file, backup_data)
             print(f"バックアップ保存完了: {backup_file}")
         except Exception as e:
             print(f"バックアップ保存エラー: {e}")
             return
         
         # 30日以上前の日付フォルダを自動削除
-        cutoff = now - timedelta(days=30)
+        cutoff = now - datetime.timedelta(days=30)
+        self._remove_expired_backups(backup_root, cutoff)
+
+    @staticmethod
+    def _remove_expired_backups(backup_root, cutoff):
+        """期限切れの日別バックアップと、空になった親フォルダを削除する。"""
         try:
             for year_name in os.listdir(backup_root):
                 year_path = os.path.join(backup_root, year_name)
@@ -339,7 +343,8 @@ class DataManager:
                         if not os.path.isdir(day_path) or not day_name.isdigit():
                             continue
                         try:
-                            folder_date = datetime(int(year_name), int(month_name), int(day_name))
+                            folder_date = datetime.datetime(
+                                int(year_name), int(month_name), int(day_name))
                             if folder_date < cutoff:
                                 shutil.rmtree(day_path)
                                 print(f"古いバックアップを削除: {day_path}")
@@ -354,38 +359,26 @@ class DataManager:
         except OSError as e:
             print(f"古いバックアップ削除エラー: {e}")
 
-    def _save_all_month_data(self):
-        """全データを年月ごとにグループ化して保存"""
-        # 年月ごとにグループ化
-        year_month_data = {}
-        
+    def _group_data_by_month(self):
+        """メモリ上の明細を、保存形式の年月・日単位にまとめる。"""
+        grouped = {}
         for key, transactions in self.data.items():
             parsed = self._parse_key(key)
             if not parsed:
                 continue
-            
             year, month, day, col_index = parsed
-            year_month_key = (year, month)
-            
-            if year_month_key not in year_month_data:
-                year_month_data[year_month_key] = {}
-            
-            day_key = str(day)
-            if day_key not in year_month_data[year_month_key]:
-                year_month_data[year_month_key][day_key] = []
-            
-            # 新フォーマットに変換
+            rows = grouped.setdefault((year, month), {}).setdefault(str(day), [])
             for transaction in transactions:
                 if len(transaction) >= 3:
-                    year_month_data[year_month_key][day_key].append(
-                        self._to_new_format_transaction(col_index, transaction)
-                    )
-        
-        # 年月ごとに保存
-        for (year, month), month_data in year_month_data.items():
+                    rows.append(self._to_new_format_transaction(col_index, transaction))
+        return grouped
+
+    def _save_all_month_data(self):
+        """全データを年月ごとにグループ化して保存する。"""
+        for (year, month), month_data in self._group_data_by_month().items():
             self._save_month_data(year, month, month_data)
     
-    def save_transaction(self, dict_key):
+    def save_transaction(self, dict_key, create_snapshot=True):
         """
         指定キーに関連する日のデータを保存する。
         同じ日の全列のデータを収集してから保存する。
@@ -398,9 +391,11 @@ class DataManager:
             return
 
         year, month, day, _ = parsed
+        if create_snapshot:
+            self.snapshot('明細変更の直前', from_disk=True)
         self._save_day_data(year, month, day)
 
-    def save_transactions(self, dict_keys):
+    def save_transactions(self, dict_keys, create_snapshot=True):
         """
         複数キーに関連するデータをまとめて保存する。
         同じ年月日のデータは1回だけ保存する。
@@ -408,6 +403,9 @@ class DataManager:
         Args:
             dict_keys: データのキーのリスト
         """
+        dict_keys = list(dict_keys)
+        if dict_keys and create_snapshot:
+            self.snapshot('明細変更の直前', from_disk=True)
         # 年月日でグループ化して重複保存を防ぐ
         saved_days = set()
         for dict_key in dict_keys:
@@ -458,8 +456,17 @@ class DataManager:
                     self.subscriptions = settings.get("subscriptions", [])
                     self.payment_methods = settings.get('payment_methods', self.payment_methods)
                     self.subscription_runs = set(settings.get("subscription_runs", []))
+                    self.budgets = settings.get('budgets', {})
             except Exception as e:
                 print(f"設定読み込みエラー: {e}")
+                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup = self.SETTINGS_FILE + f'.corrupt_{timestamp}'
+                try:
+                    shutil.copy2(self.SETTINGS_FILE, backup)
+                    detail = f'破損した設定は {backup} に保護しました。'
+                except OSError as backup_error:
+                    detail = f'破損設定の保護にも失敗しました: {backup_error}'
+                self.load_warnings.append(f'設定ファイルを読み込めませんでした。{detail}')
     
     def save_settings(self):
         """設定をファイルに保存する"""
@@ -468,7 +475,8 @@ class DataManager:
             "transaction_partners": list(self.transaction_partners),
             "subscriptions": self.subscriptions,
             "payment_methods": self.payment_methods,
-            "subscription_runs": sorted(self.subscription_runs)
+            "subscription_runs": sorted(self.subscription_runs),
+            "budgets": self.budgets
         }
         self._write_json(self.SETTINGS_FILE, settings)
     
@@ -524,80 +532,90 @@ class DataManager:
         if dict_key in self.data:
             del self.data[dict_key]
     
-    def add_transaction_partner(self, partner):
-        """支払先を履歴に追加"""
-        if partner and partner.strip():
-            self.transaction_partners.add(partner.strip())
-            # 即座に設定を保存
-            self.save_settings()
-    
     def get_transaction_partners_list(self):
         """支払先の履歴をソート済みリストで取得"""
-        return sorted(list(self.transaction_partners))
+        return sorted(self.transaction_partners)
     
     def add_custom_column(self, column_name):
         """カスタム項目を追加"""
         if column_name and column_name not in self.custom_columns:
+            previous = self.custom_columns[:]
             self.custom_columns.append(column_name)
-            self.save_settings()  # 即座に保存
+            try:
+                self.save_settings()
+            except OSError:
+                self.custom_columns = previous
+                raise
             return True
         return False
     
     def edit_custom_column(self, old_name, new_name):
         """カスタム項目名を編集"""
         if old_name in self.custom_columns and new_name not in self.custom_columns:
+            previous_columns = self.custom_columns[:]
+            previous_subscriptions = copy.deepcopy(self.subscriptions)
             index = self.custom_columns.index(old_name)
             self.custom_columns[index] = new_name
-            self.save_settings()  # 即座に保存
+            for item in self.subscriptions:
+                if item.get('category') == old_name:
+                    item['category'] = new_name
+            try:
+                self.save_settings()
+            except OSError:
+                self.custom_columns = previous_columns
+                self.subscriptions = previous_subscriptions
+                raise
             return True
         return False
     
-    def delete_custom_column(self, column_name):
-        """カスタム項目を削除"""
-        if column_name in self.custom_columns:
+    def remove_custom_column(self, column_name):
+        """分類・関連データ・設定をまとめて削除し、失敗時は元へ戻す。"""
+        if column_name not in self.custom_columns:
+            return False
+        column = len(DefaultColumns.ITEMS) + self.custom_columns.index(column_name)
+        previous_data = copy.deepcopy(self.data)
+        previous_columns = self.custom_columns[:]
+        previous_budgets = copy.deepcopy(self.budgets)
+        previous_subscriptions = copy.deepcopy(self.subscriptions)
+        affected_months = {parsed[:2] for key in self.data if (parsed := self._parse_key(key)) and parsed[3] >= column}
+        self.snapshot('分類削除の直前')
+        try:
+            self.budgets = {period: {str(int(key) - 1 if int(key) > column else int(key)): value
+                            for key, value in values.items() if int(key) != column}
+                            for period, values in self.budgets.items()}
+            for item in self.subscriptions:
+                if item.get('category') == column_name:
+                    kind = item.get('kind', 'サブスクリプション')
+                    item['category'] = self.RECURRING_DEFAULT_CATEGORIES.get(kind, 'サブスク')
             self.custom_columns.remove(column_name)
-            self.save_settings()  # 即座に保存
-            return True
-        return False
-    
-    def delete_column_data(self, col_index):
-        """指定列を削除し、右側の列データを1列左へ移動する。"""
-        year_month_set = set()
-        new_data = {}
-        for key, transactions in self.data.items():
-            parsed = self._parse_key(key)
-            if not parsed:
-                new_data[key] = transactions
-                continue
-            year, month, day, key_col = parsed
-            if key_col == col_index:
-                year_month_set.add((year, month))
-                continue
-            if key_col > col_index:
-                year_month_set.add((year, month))
-                key = f"{year}-{month}-{day}-{key_col - 1}"
-            new_data[key] = transactions
-        self.data = new_data
-        
-        # 影響を受けた年月のデータを保存
-        for year, month in year_month_set:
-            month_data = {}
+            new_data = {}
             for key, transactions in self.data.items():
                 parsed = self._parse_key(key)
-                if parsed and parsed[0] == year and parsed[1] == month:
-                    day, col_idx = parsed[2], parsed[3]
-                    day_key = str(day)
-                    
-                    if day_key not in month_data:
-                        month_data[day_key] = []
-                    
-                    for transaction in transactions:
-                        if len(transaction) >= 3:
-                            month_data[day_key].append(
-                                self._to_new_format_transaction(col_idx, transaction)
-                            )
-            
-            self._save_month_data(year, month, month_data, replace=True)
+                if not parsed:
+                    new_data[key] = transactions
+                    continue
+                year, month, day, key_col = parsed
+                if key_col == column:
+                    continue
+                target = f'{year}-{month}-{day}-{key_col - 1}' if key_col > column else key
+                new_data[target] = transactions
+            self.data = new_data
+            for year, month in affected_months:
+                self._save_complete_month(year, month)
+            self.save_settings()
+            return True
+        except Exception:
+            self.data = previous_data
+            self.custom_columns = previous_columns
+            self.budgets = previous_budgets
+            self.subscriptions = previous_subscriptions
+            try:
+                for year, month in affected_months:
+                    self._save_complete_month(year, month)
+                self.save_settings()
+            except Exception:
+                pass
+            raise
     
     def search_transactions(self, search_text):
         """取引データを検索"""
@@ -612,13 +630,14 @@ class DataManager:
                     
                     for row in data_list:
                         if len(row) >= 3:
-                            partner = str(row[0]).strip() if row[0] else ""
-                            amount = str(row[1]).strip() if row[1] else ""
-                            detail = describe(row)
+                            values = normalize(row)
+                            partner = values[0].strip()
+                            amount = values[1].strip()
+                            detail = describe(values)
+                            searchable = ' '.join((partner, amount, values[2], values[3],
+                                                   values[4], values[5], detail))
                             
-                            if (search_text_lower in partner.lower() or
-                                search_text_lower in amount.lower() or
-                                search_text_lower in detail.lower()):
+                            if search_text_lower in searchable.lower():
                                 results.append({
                                     'year': year,
                                     'month': month,
@@ -626,6 +645,11 @@ class DataManager:
                                     'col_index': col_index,
                                     'partner': partner,
                                     'amount': str(cash_amount(row)),
+                                    'gross_amount': values[1],
+                                    'points': values[3],
+                                    'payment_method': values[4],
+                                    'status': values[5],
+                                    'memo': values[2],
                                     'detail': detail
                                 })
             except (ValueError, IndexError):
@@ -660,25 +684,91 @@ class DataManager:
         rows.sort(key=lambda row: (int(row[0]), int(row[1]), int(row[2]), int(row[3])))
         with open(file_path, "w", encoding="utf-8-sig", newline="") as file:
             writer = csv.writer(file)
-            writer.writerow(["年", "月", "日", "列番号", "項目", "支払先", "金額", "メモ", "ポイント", "支払方法", "状態", "自動登録ID"])
+            writer.writerow(CSV_COLUMNS)
             writer.writerows(rows)
         return len(rows)
 
+    RECURRING_PAYMENT_TYPES = ('サブスクリプション', '家賃', '公共料金', '分割払い')
+    RECURRING_DEFAULT_CATEGORIES = {
+        'サブスクリプション': 'サブスク',
+        '家賃': '家賃・宿泊',
+        '公共料金': '光熱・通信',
+        '分割払い': '通販',
+    }
+
+    @staticmethod
+    def _add_months(value, months):
+        """月初の日付を指定月数だけ進める。"""
+        zero_based = value.year * 12 + value.month - 1 + months
+        return datetime.date(zero_based // 12, zero_based % 12 + 1, 1)
+
+    def recurring_payment_values(self, item):
+        """旧サブスク定義にも既定値を補い、共通形式で返す。"""
+        kind = item.get('kind', 'サブスクリプション')
+        return {
+            **item,
+            'kind': kind,
+            'category': item.get('category') or self.RECURRING_DEFAULT_CATEGORIES.get(kind, 'サブスク'),
+            'interval_months': max(1, int(item.get('interval_months', 1))),
+            'payment_count': max(0, int(item.get('payment_count') or 0)),
+            'enabled': item.get('enabled', True),
+            'skip_through': item.get('skip_through', ''),
+        }
+
+    def iter_recurring_payment_dates(self, item, through=None):
+        """開始日以降の支払日を (回数, 日付) で列挙する。"""
+        item = self.recurring_payment_values(item)
+        start = datetime.date.fromisoformat(item['start'])
+        interval = item['interval_months']
+        month = datetime.date(start.year, start.month, 1)
+        due = datetime.date(month.year, month.month,
+                            min(int(item['day']), calendar.monthrange(month.year, month.month)[1]))
+        if due < start:
+            month = self._add_months(month, interval)
+        number = 1
+        while not item['payment_count'] or number <= item['payment_count']:
+            day = min(int(item['day']), calendar.monthrange(month.year, month.month)[1])
+            due = datetime.date(month.year, month.month, day)
+            if through is not None and due > through:
+                break
+            yield number, due
+            number += 1
+            month = self._add_months(month, interval)
+
     def save_subscription(self, name, partner, amount, day, method, start_date,
-                          subscription_id=None, enabled=True):
-        """毎月払いの定義を登録・更新する。既存明細には影響しない。"""
+                          subscription_id=None, enabled=True, kind='サブスクリプション',
+                          category=None, interval_months=1, payment_count=None):
+        """定期支払いの定義を登録・更新する。既存明細には影響しない。"""
         if not name.strip() or not partner.strip():
             raise ValueError("名前と支払先を入力してください。")
+        if kind not in self.RECURRING_PAYMENT_TYPES:
+            raise ValueError("種類を選択してください。")
         day = int(day)
         if not 1 <= day <= 31:
             raise ValueError("支払日は1〜31で入力してください。")
+        interval_months = int(interval_months)
+        if not 1 <= interval_months <= 120:
+            raise ValueError("支払間隔は1〜120か月で入力してください。")
+        payment_count = int(payment_count or 0)
+        if payment_count < 0 or payment_count > 1200:
+            raise ValueError("支払回数は1〜1200回、または空欄で入力してください。")
+        if kind == '分割払い' and payment_count < 1:
+            raise ValueError("分割払いは支払回数を入力してください。")
         start = datetime.date.fromisoformat(start_date)
         amount = validate([partner, amount, ""])[1]
         if int(amount) < 0:
-            raise ValueError("サブスク金額は0以上で入力してください。")
+            raise ValueError("金額は0以上で入力してください。")
+        category = (category or self.RECURRING_DEFAULT_CATEGORIES[kind]).strip()
+        if category not in DefaultColumns.ITEMS + self.custom_columns or category == '日付':
+            raise ValueError("登録先の分類を選択してください。")
+        existing = next((item for item in self.subscriptions
+                         if item.get('id') == subscription_id), {})
         record = dict(id=subscription_id or uuid.uuid4().hex, name=name.strip(),
                       partner=partner.strip(), amount=amount, day=day,
-                      method=method.strip(), start=start.isoformat(), enabled=enabled)
+                      method=method.strip(), start=start.isoformat(), enabled=enabled,
+                      kind=kind, category=category, interval_months=interval_months,
+                      payment_count=payment_count,
+                      skip_through=existing.get('skip_through', ''))
         previous = self.subscriptions[:]
         self.subscriptions = [s for s in previous if s['id'] != record['id']] + [record]
         try:
@@ -693,26 +783,41 @@ class DataManager:
         today = today or datetime.date.today()
         previous_data = copy.deepcopy(self.data)
         previous_runs = self.subscription_runs.copy()
+        previous_subscriptions = copy.deepcopy(self.subscriptions)
+        schedule_changed = False
         seen = self.subscription_runs | {
             str(row[6]) for rows in self.data.values() for row in rows
             if len(row) > 6 and row[6]
         }
         affected = set()
         generated = []
-        from config import DefaultColumns
-        column = DefaultColumns.ITEMS.index("サブスク")
+        columns = DefaultColumns.ITEMS + self.custom_columns
         for subscription in self.subscriptions:
-            if not subscription.get('enabled', True):
+            raw_subscription = subscription
+            subscription = self.recurring_payment_values(raw_subscription)
+            if not subscription['enabled']:
+                value = today.isoformat()
+                if raw_subscription.get('skip_through', '') < value:
+                    raw_subscription['skip_through'] = value
+                    schedule_changed = True
                 continue
-            start = datetime.date.fromisoformat(subscription['start'])
-            for year, month in self._iter_months((start.year, start.month), (today.year, today.month)):
-                day = min(subscription['day'], calendar.monthrange(year, month)[1])
-                due = datetime.date(year, month, day)
-                occurrence = f"{subscription['id']}:{year}-{month:02d}"
-                if due < start or due > today or occurrence in seen:
+            category = subscription['category']
+            if category not in columns:
+                category = self.RECURRING_DEFAULT_CATEGORIES.get(subscription['kind'], 'サブスク')
+            column = columns.index(category)
+            skip_through = (datetime.date.fromisoformat(subscription['skip_through'])
+                            if subscription.get('skip_through') else None)
+            for number, due in self.iter_recurring_payment_dates(subscription, today):
+                if skip_through and due <= skip_through:
                     continue
-                key = f"{year}-{month}-{day}-{column}"
-                row = [subscription['partner'], subscription['amount'], subscription['name'],
+                occurrence = f"{subscription['id']}:{due.year}-{due.month:02d}"
+                if occurrence in seen:
+                    continue
+                key = f"{due.year}-{due.month}-{due.day}-{column}"
+                memo = subscription['name']
+                if subscription['payment_count']:
+                    memo += f" ({number}/{subscription['payment_count']}回)"
+                row = [subscription['partner'], subscription['amount'], memo,
                        "0", subscription['method'], PENDING, occurrence]
                 self.data.setdefault(key, []).append(row)
                 affected.add(key)
@@ -722,33 +827,28 @@ class DataManager:
             self.save_transactions(affected)
         except Exception:
             self.data = previous_data
+            self.subscriptions = previous_subscriptions
             raise
         self.subscription_runs.update(seen)
         self.subscription_runs.update(generated)
-        if self.subscription_runs != previous_runs:
+        if self.subscription_runs != previous_runs or schedule_changed:
             try:
                 self.save_settings()
             except Exception:
                 self.subscription_runs = previous_runs
+                self.subscriptions = previous_subscriptions
                 raise
         return len(generated)
 
-    def import_csv(self, file_path, start, end, mode, column_count):
-        """
-        CSVを指定期間に追加または上書きする。
-
-        replaceは指定期間全体をCSVに含まれる取引で置き換える。
-        """
-        if mode not in ("append", "replace"):
-            raise ValueError("インポート方式が不正です。")
-
-        required = {"年", "月", "日", "列番号", "支払先", "金額", "メモ"}
+    def _read_csv(self, file_path, start, end, column_count):
+        """CSVを検証し、指定期間内の明細を内部形式で返す。"""
         imported = {}
         row_count = 0
         with open(file_path, "r", encoding="utf-8-sig", newline="") as file:
             reader = csv.DictReader(file)
-            if not reader.fieldnames or not required.issubset(reader.fieldnames):
-                missing = "、".join(sorted(required - set(reader.fieldnames or [])))
+            if not reader.fieldnames or not CSV_REQUIRED_COLUMNS.issubset(reader.fieldnames):
+                missing = "、".join(sorted(
+                    CSV_REQUIRED_COLUMNS - set(reader.fieldnames or [])))
                 raise ValueError(f"CSVの必須列がありません: {missing}")
 
             for line_number, row in enumerate(reader, start=2):
@@ -765,8 +865,10 @@ class DataManager:
                 if not 1 <= month <= 12:
                     raise ValueError(f"{line_number}行目: 月は1～12で指定してください。")
                 if day == 0:
-                    if col_index != 3:
-                        raise ValueError(f"{line_number}行目: 収入データの列番号は3です。")
+                    if col_index != DefaultColumns.INCOME_COLUMN_INDEX:
+                        raise ValueError(
+                            f"{line_number}行目: 収入データの列番号は"
+                            f"{DefaultColumns.INCOME_COLUMN_INDEX}です。")
                 else:
                     try:
                         datetime.date(year, month, day)
@@ -782,7 +884,24 @@ class DataManager:
                     row.get("状態", ""), row.get("自動登録ID", "")
                 ]))
                 row_count += 1
+        return imported, row_count
 
+    def import_csv(self, file_path, start, end, mode, column_count, preview_only=False):
+        """
+        CSVを指定期間に追加または上書きする。
+
+        replaceは指定期間全体をCSVに含まれる取引で置き換える。
+        """
+        if mode not in ("append", "replace"):
+            raise ValueError("インポート方式が不正です。")
+
+        imported, row_count = self._read_csv(file_path, start, end, column_count)
+
+        if preview_only:
+            return imported
+        self.snapshot('CSV取り込みの直前')
+        previous_data = copy.deepcopy(self.data)
+        previous_partners = self.transaction_partners.copy()
         affected_months = set(self._iter_months(start, end)) if mode == "replace" else {
             self._parse_key(key)[:2] for key in imported
         }
@@ -802,9 +921,20 @@ class DataManager:
                 if partner and str(partner).strip():
                     self.transaction_partners.add(str(partner).strip())
 
-        for year, month in affected_months:
-            self._save_complete_month(year, month)
-        self.save_settings()
+        try:
+            for year, month in affected_months:
+                self._save_complete_month(year, month)
+            self.save_settings()
+        except Exception:
+            self.data = previous_data
+            self.transaction_partners = previous_partners
+            try:
+                for year, month in affected_months:
+                    self._save_complete_month(year, month)
+                self.save_settings()
+            except Exception:
+                pass
+            raise
         return row_count
 
     @staticmethod
@@ -820,17 +950,5 @@ class DataManager:
 
     def _save_complete_month(self, year, month):
         """メモリ上の月データで月別JSONを完全上書きする。"""
-        month_data = {}
-        for key, transactions in self.data.items():
-            parsed = self._parse_key(key)
-            if not parsed or parsed[:2] != (year, month):
-                continue
-            _, _, day, col_index = parsed
-            day_key = str(day)
-            month_data.setdefault(day_key, [])
-            for transaction in transactions:
-                if len(transaction) >= 3:
-                    month_data[day_key].append(
-                        self._to_new_format_transaction(col_index, transaction)
-                    )
+        month_data = self._group_data_by_month().get((year, month), {})
         self._save_month_data(year, month, month_data, replace=True)

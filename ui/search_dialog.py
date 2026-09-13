@@ -8,6 +8,17 @@ from ui.base_dialog import BaseDialog
 from config import parse_amount
 
 
+RESULT_COLUMNS = (
+    "年月日", "分類", "支払先", "利用前金額", "ポイント",
+    "現金支払額", "支払方法", "メモ", "状態",
+)
+RESULT_COLUMN_WIDTHS = {
+    "年月日": 100, "分類": 120, "支払先": 150, "利用前金額": 105,
+    "ポイント": 80, "現金支払額": 105, "支払方法": 120,
+    "メモ": 220, "状態": 85,
+}
+
+
 class SearchDialog(BaseDialog):
     """
     取引データを検索するためのダイアログ。
@@ -72,30 +83,22 @@ class SearchDialog(BaseDialog):
         result_frame.grid_columnconfigure(0, weight=1)
         
         # 結果表示用Treeview
-        columns = ["年月日", "項目", "支払先", "金額(円)", "メモ"]
-        self.result_tree = ttk.Treeview(result_frame, columns=columns, show="headings",
+        self.result_tree = ttk.Treeview(result_frame, columns=RESULT_COLUMNS, show="headings",
                                         height=15, selectmode="extended")
         
         # 列の設定
         self.default_column_widths = {}
-        widths = {
-            "年月日": 100,
-            "項目": 120,
-            "支払先": 150,
-            "金額(円)": 100,
-            "メモ": 200
-        }
-
         self.sort_column = None
         self.sort_reverse = False
         
-        for col in columns:
+        for col in RESULT_COLUMNS:
             self.result_tree.heading(col, text=col, command=lambda c=col: self._sort_by_column(c))
-            width = widths.get(col, 100)
+            width = RESULT_COLUMN_WIDTHS[col]
             self.result_tree.column(col, anchor="center", width=width, minwidth=int(width * 0.8))
             self.default_column_widths[col] = width
         
         self.result_tree.grid(row=0, column=0, sticky="nsew")
+        self.result_tree.tag_configure('pending', foreground='red')
         
         # スクロールバー
         v_scrollbar = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_tree.yview)
@@ -150,10 +153,14 @@ class SearchDialog(BaseDialog):
         # ソートキーのマッピング
         sort_key_map = {
             "年月日": lambda x: (x['year'], x['month'], x['day']),
-            "項目": lambda x: x['column'],
+            "分類": lambda x: x['column'],
             "支払先": lambda x: x['partner'],
-            "金額(円)": lambda x: parse_amount(x['amount']),
-            "メモ": lambda x: x['detail']
+            "利用前金額": lambda x: parse_amount(x['gross_amount']),
+            "ポイント": lambda x: parse_amount(x['points']),
+            "現金支払額": lambda x: parse_amount(x['amount']),
+            "支払方法": lambda x: x['payment_method'],
+            "メモ": lambda x: x['memo'],
+            "状態": lambda x: x['status']
         }
         
         # データをソート
@@ -174,15 +181,11 @@ class SearchDialog(BaseDialog):
         
         # ソート済みデータを再表示
         for result in self.search_results:
-            values = [result['date'], result['column'], result['partner'],
-                      result['amount'], result['detail']]
-            self.result_tree.insert("", "end", values=values)
+            self._insert_result(result)
     
     def _update_column_headers(self):
         """ソート状態を示すため、列ヘッダーに矢印を表示する"""
-        columns = ["年月日", "項目", "支払先", "金額(円)", "メモ"]
-        
-        for col in columns:
+        for col in RESULT_COLUMNS:
             if col == self.sort_column:
                 # ソート中の列には矢印を表示
                 arrow = " ▼" if self.sort_reverse else " ▲"
@@ -224,8 +227,8 @@ class SearchDialog(BaseDialog):
         total = 0
         for item_id in selected:
             values = self.result_tree.item(item_id, "values")
-            if len(values) > 3:
-                total += parse_amount(values[3])
+            if len(values) > 5:
+                total += parse_amount(values[5])
         messagebox.showinfo(
             "選択行の合計",
             f"選択件数: {len(selected)} 件\n合計金額: ¥{total:,}",
@@ -234,9 +237,7 @@ class SearchDialog(BaseDialog):
     
     def _reset_all_column_widths(self):
         """全ての列の幅をデフォルトにリセットする"""
-        columns = ["年月日", "項目", "支払先", "金額(円)", "メモ"]
-        
-        for i, col_name in enumerate(columns):
+        for i, col_name in enumerate(RESULT_COLUMNS):
             col_id = f"#{i + 1}"
             if col_name in self.default_column_widths:
                 self.result_tree.column(col_id, width=self.default_column_widths[col_name])
@@ -328,6 +329,11 @@ class SearchDialog(BaseDialog):
                 'column': column_name,
                 'partner': result['partner'],
                 'amount': result['amount'],
+                'gross_amount': result['gross_amount'],
+                'points': result['points'],
+                'payment_method': result['payment_method'],
+                'status': result['status'],
+                'memo': result['memo'],
                 'detail': result['detail']
             }
             self.search_results.append(search_result)
@@ -339,9 +345,7 @@ class SearchDialog(BaseDialog):
         
         # 結果を表示
         for result in self.search_results:
-            values = [result['date'], result['column'], result['partner'],
-                      result['amount'], result['detail']]
-            self.result_tree.insert("", "end", values=values)
+            self._insert_result(result)
         
         # 列ヘッダーを更新
         self._update_column_headers()
@@ -356,6 +360,13 @@ class SearchDialog(BaseDialog):
             self.stats_label.config(text=f"合計金額: ¥{total_amount:,} | 平均金額: ¥{avg_amount:.0f}")
         else:
             self.stats_label.config(text="")
+
+    def _insert_result(self, result):
+        values = [result['date'], result['column'], result['partner'],
+                  result['gross_amount'], result['points'], result['amount'],
+                  result['payment_method'], result['memo'], result['status']]
+        self.result_tree.insert('', 'end', values=values,
+                                tags=('pending',) if result['status'] else ())
     
     def _clear_results(self):
         """検索結果と入力フィールドをクリアする"""

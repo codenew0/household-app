@@ -3,8 +3,8 @@
 Treeview用のツールチップ機能
 """
 import tkinter as tk
-from models.transactions import cash_amount, describe, normalize, is_pending, validate
-from config import parse_amount
+from models.transactions import cash_amount, describe
+from config import DefaultColumns
 
 
 class TreeviewTooltip:
@@ -76,9 +76,9 @@ class TreeviewTooltip:
         if item == total_row_id:
             self._show_total_tooltip(event, col_index)
         elif item == summary_row_id:
-            if col_index == 3:
+            if col_index == DefaultColumns.INCOME_COLUMN_INDEX:
                 self._show_income_tooltip(event)
-            elif col_index == 5:
+            elif col_index == DefaultColumns.EXPENSE_COLUMN_INDEX:
                 self._show_expense_tooltip(event)
             else:
                 self._hide_tooltip()
@@ -161,7 +161,8 @@ class TreeviewTooltip:
     
     def _show_income_tooltip(self, event):
         """収入セルのツールチップを表示"""
-        dict_key = f"{self.parent_app.current_year}-{self.parent_app.current_month}-0-3"
+        income_column = DefaultColumns.INCOME_COLUMN_INDEX
+        dict_key = f"{self.parent_app.current_year}-{self.parent_app.current_month}-0-{income_column}"
         data_list = self.parent_app.data_manager.get_transaction_data(dict_key)
         
         if not data_list:

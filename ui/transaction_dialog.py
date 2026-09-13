@@ -3,13 +3,13 @@
 取引詳細を入力・編集するダイアログ
 """
 import tkinter as tk
-from models.transactions import cash_amount, describe, normalize, is_pending, validate
+from models.transactions import cash_amount, normalize, is_pending, validate
 from tkinter import ttk, messagebox
 import json
 import copy
 from ui.base_dialog import BaseDialog
 from ui.form_widgets import setup_form_styles, manage_payment_methods
-from config import DialogConfig, parse_amount
+from config import DialogConfig
 
 
 class TransactionDialog(BaseDialog):
@@ -664,8 +664,6 @@ class TransactionDialog(BaseDialog):
         # 元に戻す用に貼り付け前の状態を保存
         if new_data:
             undo_data = []
-            insert_count = 0
-            
             for row in new_data:
                 # [支払先, 金額, メモ] の形式であることを確認
                 if isinstance(row, list) and len(row) >= 2: # 少なくとも支払先と金額
@@ -689,7 +687,6 @@ class TransactionDialog(BaseDialog):
                     
                     # 元に戻す用にインデックスを記録
                     undo_data.append((insert_index, safe_row))
-                    insert_count += 1
             
             # 元に戻すスタックに保存
             if undo_data:
@@ -770,46 +767,6 @@ class TransactionDialog(BaseDialog):
                 
             except:
                 pass
-
-    def _reload_tree_without_clearing_selection(self):
-        """
-        選択状態を保持したままTreeviewのデータを再読み込み
-        """
-        # 現在の選択を保存
-        selected_items = self.tree.selection()
-        selected_indices = []
-        for item in selected_items:
-            try:
-                selected_indices.append(self.tree.index(item))
-            except:
-                pass
-        
-        # 既存の表示をクリア
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        
-        # データを取得
-        data_list = self.parent_app.data_manager.get_transaction_data(self.dict_key)
-        
-        if not data_list:
-            # データがない場合は空行を1つ追加
-            self.tree.insert("", "end", values=["", "", ""])
-        else:
-            # 既存データを表示
-            for row in data_list:
-                row_data = list(row) if row else ["", "", ""]
-                while len(row_data) < 3:
-                    row_data.append("")
-                self.tree.insert("", "end", values=normalize(row_data), tags=('pending' if is_pending(row_data) else 'confirmed',))
-            
-            # 最後に空行を追加(新規入力用)
-            self.tree.insert("", "end", values=["", "", ""])
-        
-        # 選択を復元
-        all_items = self.tree.get_children()
-        for idx in selected_indices:
-            if idx < len(all_items):
-                self.tree.selection_add(all_items[idx])
 
     def _on_ok(self):
         """OKボタンの処理"""

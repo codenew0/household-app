@@ -106,8 +106,3 @@ def recognize_layout(path, regions=None):
     if result.returncode:
         raise RuntimeError('文字認識に失敗しました。Windowsの日本語OCR機能と画像サイズを確認してください。\n' + result.stderr[-1800:])
     return json.loads(result.stdout.lstrip('\ufeff'))
-
-
-def recognize_receipt(path):
-    """従来のテキスト行取得API。"""
-    return [line['text'] for line in recognize_layout(path)['lines']]
